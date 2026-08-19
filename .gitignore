@@ -1,0 +1,46 @@
+# Environment
+.env
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Data — tracked by DVC, not git
+data/raw/
+data/processed/
+data/features/
+data/reference/
+data/predictions.db
+
+# Models — tracked by DVC or MLflow, not git
+models/
+
+# MLflow local artifacts
+mlruns/
+mlartifacts/
+
+# Notebooks output
+notebooks/.ipynb_checkpoints/
+
+# Reports (commit only final HTML reports, not intermediate)
+reports/drift/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Ruff
+.ruff_cache/

@@ -1,0 +1,78 @@
+[project]
+name = "email-intelligence-pipeline"
+version = "0.1.0"
+description = "End-to-end MLOps pipeline for email priority classification"
+requires-python = ">=3.12"
+
+dependencies = [
+    # Orchestration
+    "prefect>=3.0.0",
+
+    # ML
+    "scikit-learn>=1.5.0",
+    "lightgbm>=4.3.0",
+    "onnx>=1.16.0",
+    "onnxruntime>=1.18.0",
+    "skl2onnx>=0.5.0",
+
+    # NLP
+    "nltk>=3.8.0",
+
+    # Data
+    "pandas>=2.2.0",
+    "pyarrow>=16.0.0",
+    "numpy>=1.26.0",
+    "scipy>=1.13.0",
+    "pydantic>=2.7.0",
+    "python-dotenv>=1.0.0",
+
+    # Experiment tracking
+    "mlflow>=2.13.0",
+
+    # Serving
+    "fastapi>=0.111.0",
+    "uvicorn[standard]>=0.30.0",
+
+    # Monitoring
+    "evidently>=0.4.30",
+    "prometheus-client>=0.20.0",
+
+    # Data versioning
+    "dvc>=3.51.0",
+
+    # Utilities
+    "tqdm>=4.66.0",
+    "click>=8.1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.2.0",
+    "pytest-cov>=5.0.0",
+    "pytest-asyncio>=0.23.0",
+    "black>=24.4.0",
+    "ruff>=0.4.0",
+    "isort>=5.13.0",
+    "httpx>=0.27.0",   # for FastAPI test client
+]
+
+[tool.black]
+line-length = 88
+target-version = ["py312"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+select = ["E", "F", "I", "N", "W", "UP"]
+
+[tool.isort]
+profile = "black"
+line_length = 88
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.coverage.run]
+source = ["src"]
+omit = ["tests/*", "notebooks/*"]

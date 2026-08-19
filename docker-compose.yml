@@ -1,0 +1,77 @@
+version: "3.9"
+
+services:
+
+  # ── MLflow tracking server ──────────────────────────────────────
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v2.13.0
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./mlruns:/mlruns
+      - ./mlartifacts:/mlartifacts
+    command: >
+      mlflow server
+      --host 0.0.0.0
+      --port 5000
+      --backend-store-uri sqlite:///mlruns/mlflow.db
+      --default-artifact-root /mlartifacts
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── FastAPI prediction service ──────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: docker/api/Dockerfile
+    ports:
+      - "8000:8000"
+      - "8001:8001"   # Prometheus metrics
+    volumes:
+      - ./data:/app/data
+    environment:
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
+      - MODEL_NAME=${MODEL_NAME:-email-priority-classifier}
+      - MODEL_VERSION=${MODEL_VERSION:-1}
+      - PREDICTION_LOG_DB=/app/data/predictions.db
+      - DRIFT_CHECK_EVERY_N_PREDICTIONS=${DRIFT_CHECK_EVERY_N_PREDICTIONS:-500}
+      - DRIFT_ALERT_THRESHOLD=${DRIFT_ALERT_THRESHOLD:-0.20}
+    depends_on:
+      mlflow:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  # ── Prometheus ──────────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:v2.52.0
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    depends_on:
+      - api
+
+  # ── Grafana ────────────────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:10.4.2
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    depends_on:
+      - prometheus
+
+networks:
+  default:
+    name: email-pipeline-net
