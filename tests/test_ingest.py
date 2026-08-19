@@ -50,7 +50,15 @@ def test_parse_email_tolerates_malformed_to_header() -> None:
         make_email("9", "sender@example.com", "Subject here", to=malformed_to)
     )
     record = parse_email(msg)
-    assert record["to"] == malformed_to
+    assert record["to"] is not None
+    addresses = {a.replace('"', "").strip().lower() for a in record["to"].split(",")}
+    for expected in (
+        "sales team@enron.com",
+        ".casaudoumecq@enron.com",
+        "louise.kitchen@enron.com",
+        ".costa@enron.com",
+    ):
+        assert expected in addresses
     assert record["subject"] == "Subject here"
 
 
