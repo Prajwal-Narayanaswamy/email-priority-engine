@@ -125,6 +125,46 @@ Decisions for the Features stage (src/features/features.py):
 - features.py follows the same pattern as ingest.py: pure functions with no
   Prefect dependency. Prefect wrappers live in src/tasks/ and src/flows/.
 
+### ADR-009: Label leakage in the with-keyword-features run
+`urgency_keyword_count` and subject TF-IDF directly encode the ADR-005 labeling
+heuristic, so the model reads the same inputs the label was derived from. Measured
+consequence: test F1 = 1.00 on 517,401 rows. The run reproduces the labeling rule
+rather than predicting an unseen outcome, and F1 reaching 1.00 immediately (reported
+best_iteration = 1) is the expected signature of that, not a training bug.
+
+Path A, chosen deliberately: DOCUMENT the leakage, do not "fix" the features. The run
+is retained in the MLflow experiment as a labelled leakage example so the leak stays
+visible and measured, and the known-limitation tag is attached to the run. Removing the
+leaking features would destroy the demonstration that the leak exists and was caught.
+`behavioral-only` is the production candidate — see ADR-010.
+
+Evidence note: the F1=1.00 result and ADR-005 together establish the leakage. The
+`diag_early_stopping.py` throwaway diagnostic confirmed only that the custom early-
+stopping metric is wired correctly (invoked every iteration, reported as the sole
+metric `f1_pos`); it did not run to completion and is not the basis for this ADR.
+
+### ADR-010: behavioral-only is the production model candidate
+`behavioral-only` (7 tabular features, no `urgency_keyword_count`, no subject TF-IDF)
+is the model that goes to serving. Measured on the held-out test split (77,610 rows):
+F1 = 0.12, ROC-AUC = 0.85.
+
+Low F1 is EXPECTED and is not grounds for further model work. The labels are heuristic
+(ADR-005) and behavioural signals alone cannot perfectly recover a keyword-derived
+label: at 0.68% prevalence, "who emails me, when, and how deep is the thread" is a
+weak proxy for "did this subject contain an urgency keyword". Reporting the F1 without
+this context would misrepresent the model as broken.
+
+ROC-AUC = 0.85 is the meaningful number: it shows genuine ranking signal in
+`sender_frequency`, time-of-day, and `thread_depth`. The F1/ROC-AUC gap indicates the
+0.5 hard threshold is poorly calibrated for this base rate, so threshold selection and
+PR-AUC belong in the evaluation-stage report before anyone calls this model weak.
+
+OPEN, carried into the evaluation stage: this variant reported best_iteration = 1.
+Label leakage cannot explain that here, because this variant excludes the leaking
+features by construction. If training halted after one boosting round the model is
+under-trained and the numbers above are a floor, not a ceiling. Cause unresolved; do
+not treat these metrics as final until it is checked.
+
 ## Feature Hypotheses
 Every feature requires a hypothesis before implementation. Validate in EDA notebook.
 
