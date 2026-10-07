@@ -7,6 +7,75 @@ Be specific. "Worked on features" is useless. "Ran feature_flow.py, got KeyError
 sender column, traced to ingest output missing sender_email field" is useful.
 ---
 
+### Session: 2026-10-06 (Fixed diagnostic probes + partial commits)
+**Stage:** Evaluation — 1,000-round run completed; duplicate leakage confirmed.
+
+**What I completed:**
+- Committed only the approved unaffected files on feature/training-stage:
+  `e475417` (ARCHITECTURE.md, prior SESSION_LOG.md, .gitignore with *.log) and
+  `8daa02d` (pure evaluation module and tests). No .env or logs staged; no push.
+- Diagnostic MLflow PR-AUC probes are now exactly (1, 10, 50, 101, 300,
+  600, 1000), filtered to existing trees: at most 14 all-row/non-leadership
+  score scalars. Added diagnostic_nolead_prevalence (undefined for an empty
+  slice; omitted from numeric metrics in that case).
+- Combined diagnostics CSV contains iteration, pr_auc, nolead_pr_auc,
+  nolead_prevalence and nolead_status. Rows are the fixed probes plus every
+  50th round up to actual trees; extra CSV rounds never produce MLflow scores.
+  This supersedes the prior every-iteration metrics/CSV design below.
+- VAL only, original seven features and source hyperparameters retained,
+  no eval set/early stopping; first-tree 1e-6 gate still aborts before all
+  logging. Returned best/first/last slice summaries cover sampled points only.
+- Updated probe/clamping tests and added parameterized mocked trajectories
+  checking CSV-only rows, exact probe metric counts, slice values, prevalence
+  1/3, validation matrix usage, and failure-gate no-logging assertions.
+  Black, ruff and isort passed; targeted pytest on test_evaluate_tasks.py,
+  test_evaluate.py and test_evaluate_flow.py: 76 passed in ~83 seconds.
+- Prior complete suite verified by the user in WSL: 208 passed in 170.5s,
+  /tmp/pytest_run.log. No full suite run in OpenCode for this checkpoint.
+- After the fixed-probe changes, user ran
+  `python -m pytest tests/ -q 2>&1 | tee /tmp/pytest_run.log` in WSL:
+  209 passed, 10 warnings in 156.90s. Existing dependency deprecations and
+  Prefect temporary-server teardown logging error appeared after the passing
+  summary; no test failures. Full-suite verification is now satisfied.
+
+**Results so far (user-reported, not a new run):**
+- Evaluation run e4b8bd70aa0a4d22803ae70cf16ce194: tuned threshold 0.9121,
+  test F1 0.3765, test PR-AUC 0.3115; non-leadership test F1 0.0505 and
+  PR-AUC 0.0661; Evidently 0/7 drifted. Diagnostic all-row val PR-AUC rises
+  from ~0.294 at 1 tree to ~0.545 at 300; reproduction gap is zero.
+- Open question: how much later-round ranking improvement survives excluding
+  leadership rows, relative to the slice's own prevalence/chance baseline?
+
+**Completed 1,000-round run and duplicate-leakage findings (user-reported):**
+- Flow succeeded in WSL: evaluation run `f0318a1b30c14c3bb7f54f6d054807f3`.
+  Source training run remains `d6902c4475864604bdbeaeba55e18371`.
+- Validation PR-AUC (all rows / non-leadership); non-leadership prevalence=0.0055:
+  1 tree 0.294 / 0.077; 10 trees 0.310 / 0.101; 50 trees 0.368 / 0.129;
+  101 trees 0.406 / 0.186; 300 trees 0.545 / 0.384;
+  600 trees 0.666 / 0.546; 1000 trees 0.738 / 0.643. No plateau by 1000.
+- CONFIRMED by the user's read-only terminal check: 76.8% of the 517,401
+  rows share (from, subject, date) with another row (78.8% of positives).
+  In the seed-42 split, 66.9% of validation rows (71.1% of validation
+  positives) have an identical email in train. Every training and evaluation
+  metric so far was measured on a split with duplicate leakage and must be
+  re-run after deduplication.
+- UNTESTED HYPOTHESIS: the steep non-leadership climb is memorization of
+  duplicates. Do not treat this hypothesis as established by the overlap counts.
+- Do NOT choose a tree count until the re-run on a deduplicated split.
+  Do NOT write a training-v2 ADR yet. No split, feature, training, or saved-model
+  changes made; deduplication analysis is read-only at this checkpoint.
+
+**Pending / exact next action:**
+> Approved task/flow files committed as 3ce9d33; this log is recorded in a
+> separate documentation commit. Full-suite verification: 209 passed in WSL.
+> Run the read-only duplicate-key analysis in WSL: unique keys and group
+> sizes; retained rows/positives/leadership positives; mixed-label groups;
+> deduplicated split positive counts; five largest groups. Paste results back
+> before any deduplication or training change. No push, tree-count selection,
+> model promotion, variant-3 code, training-v2 ADR, or HTML report.
+
+---
+
 ### Session: 2026-10-06 (Evaluation implementation + full validation diagnostic curves)
 **Stage:** Evaluation (1,000-round full-data diagnostic pending)
 
