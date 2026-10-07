@@ -28,12 +28,17 @@ sender column, traced to ingest output missing sender_email field" is useful.
   tagged superseded in a later authorized step. No runs modified in this step.
   Confidence intervals required for the thin new evaluation slices.
 - Printed a WSL-only read-only command comparing raw vs normalize_sender(from)
-  and unique sender/subject/date key counts. Its results remain pending; the
-  approved dedupe/group keys use raw from, as in the measured feasibility run.
+  and unique sender/subject/date key counts. User supplied the result:
+  2,430 of 517,401 rows differ, but raw and normalized sender keys both retain
+  251,741 unique emails (difference 0) and 1,494 positives. Updated ADR-012:
+  the raw (from, subject, date) dedupe key is confirmed.
+- Step 0 completed: documentation only. No split module or wiring written;
+  Step 1 remains behind the requested approval checkpoint.
 
 **Pending / exact next action:**
-> Run the printed sender-normalization check in WSL and paste its output.
-> Then approve implementation before changing code. Rerun order: dedupe ->
+> Wait for approval after the Step 0 documentation commit before implementing
+> Step 1 (pure src/training/splits.py and tests). Step 2 wiring requires its
+> own approval after Step 1. Rerun order: dedupe ->
 > features -> training -> evaluation -> diagnostic -> Evidently. No early-
 > stopping change, feature-definition change, new variants, model promotion,
 > training-v2 ADR, push, or full-suite execution inside OpenCode.

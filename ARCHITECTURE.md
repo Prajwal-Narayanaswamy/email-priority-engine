@@ -222,7 +222,9 @@ evaluate generalization to unseen sender/subject groups.
 - Deduplicate by exact `(from, subject, date)`, keeping the first row in input
   order, BEFORE `engineer_features`, so `sender_frequency` counts unique emails.
   `from` remains raw in these keys, matching the measured analysis. The
-  normalized-sender key-count check is pending; no sender-key change is approved.
+  sender-normalization check found 2,430 of 517,401 rows where raw `from`
+  differs from `normalize_sender(from)`, but both keys retain 251,741 unique
+  emails (difference 0) and 1,494 positives. The raw dedupe key is confirmed.
 - Group key is `(from, normalized subject)`. Normalize subjects by lowercasing,
   repeatedly stripping leading `RE:`/`FW:`/`FWD:`/`REW:` markers, collapsing
   whitespace, and stripping surrounding whitespace. Missing subjects map to
