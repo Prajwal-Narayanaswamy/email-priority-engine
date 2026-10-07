@@ -7,6 +7,144 @@ Be specific. "Worked on features" is useless. "Ran feature_flow.py, got KeyError
 sender column, traced to ingest output missing sender_email field" is useful.
 ---
 
+### Session: 2026-10-06 (Evaluation implementation + full validation diagnostic curves)
+**Stage:** Evaluation (1,000-round full-data diagnostic pending)
+
+**Context and earlier work completed this session:**
+- Training was re-run directly into SQLite after file-store migration failed
+  on duplicate metric rows. Old file-store runs are discarded. Evaluate
+  behavioral-only source run `d6902c4475864604bdbeaeba55e18371` using
+  `sqlite:///mlruns/mlflow.db` (repo-root absolute default when not overridden).
+- Implemented `src/evaluation/evaluate.py`: pure threshold metrics, exhaustive
+  distinct-score sweep from sklearn precision_recall_curve (no fixed grid),
+  PR-AUC as average precision, ROC-AUC, Agg PR/ROC plots, split verification,
+  and `pr_auc_by_iteration`. Scores are inflated/uncalibrated due to
+  scale_pos_weight=145.7; thresholds are not calibrated urgency probabilities.
+- Implemented `src/tasks/evaluate_tasks.py`: reads only priority + the seven
+  behavioral features, reconstructs the full split, aborts on mismatched
+  val/test row and positive counts, scores val/test once, chooses the max-F1
+  threshold on val, and applies it unchanged to test. Distinct operating
+  points and iteration tables are CSV artifacts, not individual sweep metrics.
+- Model loading uses mlflow.sklearn.load_model on the source run's MLflow 3
+  LoggedModel (`m-ae214a2426fe45f182e309cd6662979f`). MLflow 3.15 reads the
+  logged skops trusted types from MLmodel; load_model accepts no trusted-types
+  keyword. No vectorizer is loaded for behavioral-only.
+- Implemented `src/flows/evaluate_flow.py` and its task-mocked tests. Click CLI
+  requires --run-id, has no --limit, loads dotenv before task imports, and logs
+  the tracking URI. Approved order: main evaluation -> diagnostic retrain ->
+  Evidently baseline. Metrics/plots are persisted before either late task.
+- Main evaluation creates a new `evaluation-behavioral-only` run with
+  source_run_id as param and tag. Late tasks resume only that evaluation run;
+  they do not write to the training run. Current implementation does not set
+  mlflow.parentRunId (the September plan's parent-link wording is historical).
+- Verified leadership leakage: all 732 leadership rows have priority=1;
+  732 leadership + 2,794 non-leadership positives = 3,526. The saved tree's
+  root feature is sender_is_leadership (27.4% of gain); subject_length accounts
+  for 53.5%. Amended ADR-010 to "keyword-clean, leadership-leaky", withdrawing
+  production-candidate status until the leadership-free variant is evaluated.
+- Added test leadership-slice P/R/F1/PR-AUC at the same val-tuned threshold,
+  plus leadership row and flagged counts, as evaluation scalars. Added ADR-011
+  for the planned six-feature no-label-inputs variant; sender_frequency and
+  subject_length may still proxy heuristic label inputs. No variant-3 code.
+- Resolved best_iteration=1 empirically: toy early stopping ran 12 rounds,
+  best=2, retained only two trees; default serialization saves best iteration.
+  Real artifact evals_result_ has 101 rounds, round-1 val F1=0.115967 never
+  beaten, with one retained tree. lgb.train's default post-training
+  model_to_string round-trip discards later trees. One boosting round is NOT
+  a decision stump: the retained tree has 31 leaves. Diagnostic retraining is
+  needed to measure later-round ranking quality without changing the model.
+- Initial full evaluation failed in summarize_drift on Wasserstein distance.
+  The completed fix and read-only raw-output investigation are recorded in the
+  next historical entry. The subsequent successful WSL run is recorded below.
+
+**What I completed:**
+- User reports full WSL evaluation completed successfully, evaluation run
+  `e4b8bd70aa0a4d22803ae70cf16ce194`, source training run
+  `d6902c4475864604bdbeaeba55e18371`. Evidently reported 0/7 drifted columns.
+- The completed 300-round diagnostic's validation PR-AUC increased:
+  1=0.2942, 10=0.3101, 50=0.3676, 101=0.4064, 300=0.5448.
+  First-tree reproduction gate passed with zero gap (user-supplied results).
+- Extended `retrain_diagnostic_task` default to 1,000 fixed rounds, with no
+  early stopping. Training split, seven behavioral features (including
+  sender_is_leadership), source hyperparameters, seed, and 1e-6 gate preserved.
+- Scores every available iteration on validation only, for all rows and
+  sender_is_leadership == 0 rows. Stores one prediction array at a time.
+  This is a slice diagnostic, not a leadership-free model variant.
+- Logs two CSV curves (`retrain_pr_auc_val.csv` and
+  `retrain_nolead_pr_auc_val.csv`), per-iteration PR-AUC metrics, and each
+  slice's best iteration, best/first/final PR-AUC, rows, and positive count.
+  Best-score ties select the earliest iteration. Empty/no-positive slices
+  get explicit status, blank CSV scores, None summary values, and no
+  undefined numeric MLflow metric. Undefined all-row PR-AUC aborts the gate.
+- Added four regressions: 1,000-round default, controlled every-iteration
+  curves and summaries, empty non-leadership slice, no-positive non-leadership
+  slice. Updated the existing diagnostic logging test; failure-gate tests retained.
+  Black, ruff, isort passed; full suite: 208 passed (204 + 4), ~182 seconds.
+
+**What is broken or blocked:**
+- The 1,000-round full-data run is STILL PENDING; not run in OpenCode.
+- Dependency warnings and Prefect teardown logging noise remain after tests pass.
+- HTML report and no-label-inputs variant remain deferred. Saved model and
+  training code unchanged; no promotion or replacement performed.
+- Serving has not started and is not approved. Full-dataset work belongs in
+  the user's WSL terminal; preserve the approval gates for subsequent steps.
+
+**Current decisions / interpretation:**
+- The 300-round validation curve establishes improvement beyond the original
+  F1-selected round 1, but no best 1,000-round iteration is known yet. Do not
+  infer a plateau or promote a model from the pending diagnostic.
+- Compare all-row and non-leadership validation curves. Both measure recovery
+  of heuristic labels, not independently labelled real-world urgency.
+- The September entry is preserved as history: its "evaluation not started",
+  "honest production candidate", and "unexplained best_iteration=1" statements
+  are superseded by the work and ADR amendments documented above.
+
+**Next session — exact first action:**
+> Run from the repo root in the user's WSL terminal (full evaluation, NEW run):
+> MLFLOW_TRACKING_URI=sqlite:///mlruns/mlflow.db python -m src.flows.evaluate_flow --run-id d6902c4475864604bdbeaeba55e18371 --input data/features/features.parquet --seed 42 --reference-cap 50000 --n-estimators 1000
+> Paste the output back and inspect both validation curves before deciding next steps.
+
+---
+
+### Session: 2026-10-06 (Evaluation — Evidently interpretation fix)
+**Stage:** Evaluation (full flow rerun pending approval)
+
+**What I completed:**
+- Fixed `summarize_drift` in `src/tasks/evaluate_tasks.py` after the real run
+  rejected `Wasserstein distance (normed)`. Evidently 0.7.21 uses distance
+  methods for the full-size reference; the original mocks covered p-values only.
+- Headline count/share remain Evidently's own values. Per-column records contain
+  column, method, value, threshold, and drifted. Explicit boolean flags take
+  precedence; fallback directions verified in installed source: Wasserstein and
+  Jensen-Shannon >= threshold, chi-square < threshold, K-S <= threshold.
+  Supports both auto-selected display names and explicitly configured registry names.
+- Unknown methods are reported together with all affected columns. A count
+  disagreement aborts before logging and includes both counts and the column table.
+  The Evidently task now logs `evidently_columns.csv` alongside its HTML artifact.
+- Added regressions including one unmocked 80-row Evidently test exercising
+  both drift outcomes for both Wasserstein and chi-square. Full suite:
+  204 passed (193 + 11); black, ruff, and isort passed on changed files.
+- User's WSL read-only run: reference=50,000 train rows, current=77,611 test
+  rows (529 positives), 0/7 drifted columns. No explicit drift flags emitted.
+  sender_frequency Wasserstein=0.0066648467627892; hour_of_day
+  Wasserstein=0.00840775905472518; has_question_mark Jensen-Shannon=
+  0.0019835684608966566; thresholds all 0.1, so none drifted.
+
+**What is broken or blocked:**
+- Prior full evaluation failed at drift-summary parsing; the fix is tested but
+  the full flow has NOT been rerun. Dependency deprecations and Prefect teardown
+  logging noise still occur after the passing test suite.
+- Diagnostic extension to 1,000 rounds with no-leadership val PR-AUC (Task 2)
+  requires explicit approval. No Task 2 changes made in this step.
+- HTML report pending; no-label-inputs variant remains planned only (ADR-011).
+
+**Next session — exact first action:**
+> Wait for approval of Task 1 Step 2 before extending the diagnostic retrain
+> to 1,000 rounds with all-row and non-leadership validation PR-AUC. Do not
+> rerun the flow until separately authorized; full runs belong in WSL.
+
+---
+
 ### Session: 2026-09-29 (Training close-out + Evaluation planning)
 **Duration:** —
 **Stage:** Training (closed) → Evaluation (planned, not started)

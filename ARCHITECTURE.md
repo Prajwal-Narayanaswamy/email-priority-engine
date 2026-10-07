@@ -143,10 +143,28 @@ Evidence note: the F1=1.00 result and ADR-005 together establish the leakage. Th
 stopping metric is wired correctly (invoked every iteration, reported as the sole
 metric `f1_pos`); it did not run to completion and is not the basis for this ADR.
 
-### ADR-010: behavioral-only is the production model candidate
+### ADR-010: behavioral-only is keyword-clean, leadership-leaky (amended 2026-10-06)
 `behavioral-only` (7 tabular features, no `urgency_keyword_count`, no subject TF-IDF)
-is the model that goes to serving. Measured on the held-out test split (77,610 rows):
-F1 = 0.12, ROC-AUC = 0.85.
+is clean of the KEYWORD channel but NOT of the leadership channel: it retains
+`sender_is_leadership`, which is a direct readout of half the ADR-005 label rule
+(leadership OR keyword). It is therefore NOT a production candidate until the
+leadership-free variant (ADR-011) is trained and evaluated. The original
+"production candidate" designation (2026-09-29) is superseded by this amendment;
+the variant is retained as a measured example of partial leakage, same Path-A
+treatment as ADR-009.
+
+Evidence (read-only checks on the full 517,401 rows and the saved artifact):
+- `sender_is_leadership == 1` implies `priority == 1` in all 732 rows, zero
+  exceptions; 732 + 2,794 = 3,526 positives, so ~21% of positives are separable
+  by this one feature alone.
+- The saved model's single tree splits on `sender_is_leadership` at its ROOT
+  (threshold ~0, gain 3.1M = 27.4% of total gain), ahead of `sender_frequency`
+  (13.2%). `subject_length` leads on gain (53.5%) — see the ADR-011 caveat.
+- Consequence: the test F1 = 0.12 mixes genuine behavioural signal with
+  leadership-channel recall and must not be quoted as an honest-model number.
+  The evaluation report separates the two with leadership-slice metrics.
+
+Measured on the held-out test split (77,611 rows): F1 = 0.12, ROC-AUC = 0.85.
 
 Low F1 is EXPECTED and is not grounds for further model work. The labels are heuristic
 (ADR-005) and behavioural signals alone cannot perfectly recover a keyword-derived
@@ -154,16 +172,40 @@ label: at 0.68% prevalence, "who emails me, when, and how deep is the thread" is
 weak proxy for "did this subject contain an urgency keyword". Reporting the F1 without
 this context would misrepresent the model as broken.
 
-ROC-AUC = 0.85 is the meaningful number: it shows genuine ranking signal in
-`sender_frequency`, time-of-day, and `thread_depth`. The F1/ROC-AUC gap indicates the
-0.5 hard threshold is poorly calibrated for this base rate, so threshold selection and
-PR-AUC belong in the evaluation-stage report before anyone calls this model weak.
+ROC-AUC = 0.85 shows ranking signal, but that reading is now qualified: part of it
+comes through the leadership channel (see evidence above), which the
+leadership-slice metrics in the evaluation report separate out. The F1/ROC-AUC
+gap still indicates the 0.5 hard threshold is poorly calibrated for this base
+rate, so threshold selection and PR-AUC belong in the evaluation-stage report
+before anyone calls this model weak.
 
-OPEN, carried into the evaluation stage: this variant reported best_iteration = 1.
-Label leakage cannot explain that here, because this variant excludes the leaking
-features by construction. If training halted after one boosting round the model is
-under-trained and the numbers above are a floor, not a ceiling. Cause unresolved; do
-not treat these metrics as final until it is checked.
+RESOLVED 2026-10-06 (was OPEN): best_iteration = 1 is explained, not a bug.
+The artifact's own `evals_result_` shows 101 rounds ran with val F1 peaking at
+round 1 (0.115967, never beaten), so early stopping halted at 1+100 correctly;
+then `lgb.train()` re-serialized through `model_to_string()` with
+`num_iteration=None` (the default unless `keep_training_booster=True`), which
+saves the best iteration only — verified empirically on LightGBM 4.7.0. The
+artifact is one tree by construction of the pipeline. Whether later trees
+would have added RANKING signal (F1@0.5 never improved, but PR-AUC might have)
+is tested by the diagnostic retrain, not by relitigating early stopping.
+
+### ADR-011: third variant "no-label-inputs" (planned, not trained)
+A third training variant excluding every direct label input: 6 features —
+`sender_frequency`, `hour_of_day`, `day_of_week`, `subject_length`,
+`has_question_mark`, `thread_depth` (drops `sender_is_leadership` AND
+`urgency_keyword_count`; no TF-IDF). Rationale: ADR-010 shows behavioral-only
+leaks through the leadership channel; this variant removes it, so its score
+measures behavioural recovery of the heuristic without either direct channel.
+
+Caveat, stated before training: `sender_frequency` and `subject_length` may
+still proxy label inputs (frequent senders overlap leadership; subject length
+may correlate with keyword-bearing subjects), so even this variant's results
+measure recovery of a heuristic, not true urgency. Report them with that
+framing, never as production-ready priority prediction.
+
+Status: scoped only — no code, no training run. Training it is out of scope
+for the evaluation stage; it is the defined next step if a production
+candidate is still wanted after this evaluation lands.
 
 ## Feature Hypotheses
 Every feature requires a hypothesis before implementation. Validate in EDA notebook.
