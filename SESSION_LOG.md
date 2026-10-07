@@ -7,6 +7,35 @@ Be specific. "Worked on features" is useless. "Ran feature_flow.py, got KeyError
 sender column, traced to ingest output missing sender_email field" is useful.
 ---
 
+### Session: 2026-10-06 (ADR-012 Step 1 — pure split module)
+**Stage:** Evaluation/data-split redesign — pure module; pipeline wiring pending.
+
+**PRE-REGISTERED expectation (written before the clean-split re-run):**
+> behavioral-only non-leadership PR-AUC is expected to fall sharply on the clean split, and the tree-count curve to flatten or turn noisy. If the climb survives, it is signal subject to the ADR-011 proxy caveat.
+
+**What I completed:**
+- Added pure src/training/splits.py: normalize_subject, dedupe_exact_keys
+  (raw sender, keep first), grouped_split (20 folds, seed 42, 14/3/3), and
+  split_fingerprint (SHA-256 over JSON-encoded sorted string UIDs per split).
+  SPLIT_STRATEGY=stratified-group-kfold-20-14-3-3, SPLIT_VERSION=1.
+- Group IDs follow the measured first-appearance policy; reproduce using the
+  same input ordering. Outputs preserve indices/columns and do not mutate input.
+  Deduplication stays separate so Step 2 can apply it before feature engineering.
+- Added tests/test_splits.py for stacked markers, whitespace and missing
+  subjects; first-row raw-key retention; disjoint groups and complete row
+  coverage; deterministic fingerprints and changed-seed behavior; proportions;
+  row-order-independent hashes and membership sensitivity; missing UID / invalid
+  labels / insufficient groups; empty-subject and missing-sender grouping.
+- Black, ruff and isort passed on the new module/tests. Targeted pytest:
+  17 passed in 2.13s. No full dataset or full-suite execution inside OpenCode;
+  no wiring or training changes.
+
+**Next session — exact first action:**
+> After Step 1 checks and commit, wait for approval before Step 2 wiring.
+> Do not run the clean-data pipelines until wired, tested, and authorized.
+
+---
+
 ### Session: 2026-10-06 (ADR-012 — deduplication and grouped split approved)
 **Stage:** Evaluation/data-split redesign — documentation only, code pending.
 
