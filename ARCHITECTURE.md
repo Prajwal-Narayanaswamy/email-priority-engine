@@ -144,6 +144,7 @@ stopping metric is wired correctly (invoked every iteration, reported as the sol
 metric `f1_pos`); it did not run to completion and is not the basis for this ADR.
 
 ### ADR-010: behavioral-only is keyword-clean, leadership-leaky (amended 2026-10-06)
+See ADR-012: all earlier performance metrics are superseded by confirmed duplicate leakage.
 `behavioral-only` (7 tabular features, no `urgency_keyword_count`, no subject TF-IDF)
 is clean of the KEYWORD channel but NOT of the leadership channel: it retains
 `sender_is_leadership`, which is a direct readout of half the ADR-005 label rule
@@ -206,6 +207,72 @@ framing, never as production-ready priority prediction.
 Status: scoped only — no code, no training run. Training it is out of scope
 for the evaluation stage; it is the defined next step if a production
 candidate is still wanted after this evaluation lands.
+
+### ADR-012: Exact-key deduplication and grouped split (approved, not implemented)
+**Context:** Read-only checks confirmed that 76.8% of the 517,401 rows share
+`(from, subject, date)` with another row (78.8% of positives). In the seed-42
+random split, 66.9% of validation rows (71.1% of validation positives) had an
+identical email in train. After exact deduplication plus a random stratified
+split, 28.3% of validation rows (30.4% of positives) still share an exact
+`(from, subject)` pair with train, and 59.7% (61.2% of positives) share a
+normalized subject. Exact deduplication alone is therefore insufficient to
+evaluate generalization to unseen sender/subject groups.
+
+**Decision:**
+- Deduplicate by exact `(from, subject, date)`, keeping the first row in input
+  order, BEFORE `engineer_features`, so `sender_frequency` counts unique emails.
+  `from` remains raw in these keys, matching the measured analysis. The
+  normalized-sender key-count check is pending; no sender-key change is approved.
+- Group key is `(from, normalized subject)`. Normalize subjects by lowercasing,
+  repeatedly stripping leading `RE:`/`FW:`/`FWD:`/`REW:` markers, collapsing
+  whitespace, and stripping surrounding whitespace. Missing subjects map to
+  the empty string, matching the feasibility check.
+- Split with `StratifiedGroupKFold(n_splits=20, shuffle=True, random_state=42)`:
+  folds 0-13 train, 14-16 validation, 17-19 test. Training, evaluation, and
+  diagnostic reconstruction must share the same split function and group policy.
+  Do not select folds based on scores or positive counts.
+- Extend the split-reproducibility gate to check strategy/version, seed,
+  deduplication policy, row and positive counts, and a membership fingerprint.
+  Abort on mismatch before tuning thresholds or interpreting diagnostic scores.
+- Derive `scale_pos_weight` at runtime from the training labels as
+  `train_negatives / train_positives`, and log it. This supersedes the hard-coded
+  145.7: the measured new training split gives 175,174 / 1,045, about 167.6.
+
+**Measured outcome:** Exact-key deduplication retained 251,741 rows and 1,494
+positives, including 295 leadership positives. No key group has mixed labels.
+The grouped split produced:
+
+| Split | Rows | Positives | Leadership positives |
+|---|---:|---:|---:|
+| Train | 176,219 | 1,045 | 175 |
+| Validation | 37,761 | 224 | 60 |
+| Test | 37,761 | 225 | 60 |
+
+Zero `(from, normalized subject)` group overlap between all pairs of splits.
+
+**Consequences:** Every earlier training and evaluation metric was measured on
+a duplicate-leaky split and is superseded: F1 0.12, ROC-AUC 0.85, tuned threshold
+0.9121, test F1 0.3765, and the tree-count curve must not be quoted as current
+performance or compared against the new split. Preserve historical runs and
+artifacts, but tag old MLflow runs `superseded` with the duplicate-leakage reason
+and legacy data/split provenance. Rerun deduplication -> features -> training ->
+evaluation -> diagnostic -> Evidently before drawing model conclusions or
+choosing a tree count. Validation and test are thin (224/225 positives;
+164/165 non-leadership positives), so evaluation must report confidence intervals.
+
+**Known limitations:**
+- Same-subject overlap across different senders remains; grouping by sender
+  and normalized subject does not guarantee subject-only disjointness.
+- Empty-subject senders form large single groups; the largest has 1,291 rows.
+- `sender_frequency` is computed over all unique emails, including held-out
+  ones; that existing transductive leakage is retained and disclosed.
+- Labels remain heuristic (ADR-005), not independently assessed true urgency.
+  Non-leadership positives are keyword labels by construction.
+
+**Out of scope:** Early stopping, feature definitions, model settings other
+than the explicitly approved runtime class-weight derivation, and variants.
+No training-v2 ADR, new variant, or model promotion in this pass. This ADR
+records the approved design only; pipeline code and stored models are unchanged.
 
 ## Feature Hypotheses
 Every feature requires a hypothesis before implementation. Validate in EDA notebook.

@@ -7,6 +7,39 @@ Be specific. "Worked on features" is useless. "Ran feature_flow.py, got KeyError
 sender column, traced to ingest output missing sender_email field" is useful.
 ---
 
+### Session: 2026-10-06 (ADR-012 — deduplication and grouped split approved)
+**Stage:** Evaluation/data-split redesign — documentation only, code pending.
+
+**What I completed:**
+- Recorded user-supplied Part B analysis: exact deduplication retains 251,741
+  rows / 1,494 positives (295 leadership), with zero mixed-label key groups.
+  Random stratification still exposes 28.3% of val rows / 30.4% of positives
+  to an exact sender/subject pair in train, and 59.7% / 61.2% to a normalized
+  subject in train.
+- Grouped feasibility: 177,913 groups (median 1, p90 2, p99 6, max 1,291).
+  StratifiedGroupKFold 20 folds assigned 14/3/3 yields train 176,219 / 1,045
+  positives (175 leadership), val 37,761 / 224 (60 leadership), test 37,761 /
+  225 (60 leadership), with zero pairwise group overlap.
+- Added ADR-012 and one-line ADR-010 pointer. Plan B approved: exact-key
+  dedupe before engineer_features, grouped splitting shared by training /
+  evaluation / diagnostic, expanded split gate with provenance and fingerprint,
+  and runtime train-label scale_pos_weight (~167.6 instead of fixed 145.7).
+- Earlier duplicate-leaky metrics are superseded; old MLflow runs are to be
+  tagged superseded in a later authorized step. No runs modified in this step.
+  Confidence intervals required for the thin new evaluation slices.
+- Printed a WSL-only read-only command comparing raw vs normalize_sender(from)
+  and unique sender/subject/date key counts. Its results remain pending; the
+  approved dedupe/group keys use raw from, as in the measured feasibility run.
+
+**Pending / exact next action:**
+> Run the printed sender-normalization check in WSL and paste its output.
+> Then approve implementation before changing code. Rerun order: dedupe ->
+> features -> training -> evaluation -> diagnostic -> Evidently. No early-
+> stopping change, feature-definition change, new variants, model promotion,
+> training-v2 ADR, push, or full-suite execution inside OpenCode.
+
+---
+
 ### Session: 2026-10-06 (Fixed diagnostic probes + partial commits)
 **Stage:** Evaluation — 1,000-round run completed; duplicate leakage confirmed.
 
