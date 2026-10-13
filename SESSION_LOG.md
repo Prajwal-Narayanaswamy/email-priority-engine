@@ -7,6 +7,130 @@ Be specific. "Worked on features" is useless. "Ran feature_flow.py, got KeyError
 sender column, traced to ingest output missing sender_email field" is useful.
 ---
 
+### Session: 2026-10-12 (Step 2b committed; ADR-013 clean-split decision)
+**Stage:** Clean-split evaluation complete; uncertainty reporting (Step 2c) pending.
+
+**What I completed:**
+- Committed Step 2b code/tests as 756df2a after status confirmed only the
+  expected evaluation files and log. User's WSL full suite: 250 passed in
+  173.95s; no full suite run in OpenCode and no push.
+- Recorded clean evaluation db09d4a9c99040b2aefd2d374982410c, source
+  7189707b198f47748f89965712eee4bc. At val-tuned threshold ~0.9943,
+  exactly 60 leadership rows flagged in BOTH val/test, identical to the
+  leadership-only rule. Test precision 1.0, recall 0.267, F1 0.421,
+  flag rate 0.00159; val F1 0.423. Non-leadership F1=0.
+- Test non-leadership PR-AUC ~0.032 vs prevalence ~0.0044 (~7x chance).
+  Val non-leadership probes ~0.012-0.021 (~3-5x chance); differences between
+  tree counts treated as within noise with only ~164 positives. Confidence
+  intervals are pending, so that is an interpretation, not a significance test.
+- All-row val PR-AUC 0.293 (1 tree), 0.322 (1000), 0.318 (1886);
+  val ROC-AUC 0.795 (1 tree) vs 0.786 (1886). Diagnostic reproduced artifact
+  at 1886 trees with gap 0, no deterministic retry. Evidently 0/7 drifted.
+- PRE-REGISTERED expectation: CONFIRMED descriptively — non-leadership
+  PR-AUC at 1000 trees fell from 0.643 (superseded leaky split) to ~0.021;
+  clean tree-count curve is flat/non-monotonic. The historical contrast is
+  uncontrolled (val set, scale_pos_weight and training data/frequencies changed),
+  not proof that duplicates alone caused the old climb or a like-for-like
+  performance comparison. No tree count selected or saved model replaced.
+- Added ADR-013: behavioral-only NOT a production urgency candidate, but
+  retained as the serving/monitoring reference with leadership-label baseline
+  and weak behavioral signal clearly disclosed. F1 ~0.42 cannot be quoted
+  without that baseline. Training-v2 (early stopping on PR-AUC) not pursued;
+  variant 3 remains decision pending. Added pointers on ADR-010 and ADR-011.
+- Step 2c must address thin positive counts and correlated sender/subject
+  groups; no confidence intervals, HTML report or serving implementation yet.
+
+**Next session — exact first action:**
+> Wait for Step 2c approval before implementing uncertainty estimates.
+> No push, training/early-stopping change, new variant, saved-model replacement,
+> tree-count selection, HTML report or serving work without separate approval.
+
+---
+
+### Session: 2026-10-12 (ADR-012 Step 2b — evaluation wiring, prior checkpoint)
+**Stage:** First clean-split evaluation completed in WSL; Step 2b uncommitted.
+
+**What I completed:**
+- Clean source run defaults to behavioral-only 7189707b198f47748f89965712eee4bc.
+  User confirms best_iteration=1886 and shared training fingerprint
+  c11d9d38cc466510e85b156ddd32b37a385f7b0b1a4c406f9a936f3de4e326cd.
+- load_split_task reads uid/from/subject/priority and seven behavioral columns,
+  never body. It is the only evaluation task calling grouped_split; the flow
+  calls it once and reuses exact frames for metrics, diagnostic and Evidently.
+  No persistent cache. Training's repeated splitting is unchanged/out of scope.
+- verify_split compares split_strategy, split_version, split_seed, dedupe_policy,
+  train/val/test rows and positives, split_fingerprint and scale_pos_weight.
+  Lists every missing/invalid/mismatched field. Source missing split provenance
+  or tagged superseded is rejected with duplicate-leaky explanation and the
+  clean source run id to use; no scoring/logged results before the gate passes.
+- Evaluation run logs reconstructed split provenance/fingerprint and weight;
+  source_run_id remains param AND tag; val chooses threshold, unchanged on test.
+  MLflow model loading logs best_iteration_ and physical trees; single-tree
+  warning only for actual one-tree boosters. No writes to training runs.
+- Diagnostic reads source seed, learning_rate, num_leaves, scale_pos_weight and
+  n_estimators. No independent round override (--n-estimators removed from
+  evaluation CLI), no eval set or early stopping; no saved-model changes.
+- Reproduction gate compares retrain truncated to the artifact's actual trees
+  against artifact val PR-AUC, tolerance 1e-6. On mismatch retry deterministic=True,
+  num_threads=1 / n_jobs=1, record both gaps, and abort before logging if retry
+  fails. Multi-tree gate replaces the obsolete first-tree assumption.
+- Diagnostic val-only probes: 1,10,50,100,300,600,1000,1500 plus artifact best
+  iteration and final physical tree, filtered to existing trees. Both all-row
+  and leadership==0 PR-AUC plus slice prevalence; CSV adds every 100th round
+  and reproduction point. Extra CSV points are not MLflow score metrics.
+- Evidently remains last: capped 50k train reference vs full test, same drift
+  interpretation/consistency guard. CI/report work remains pending separately.
+- Black, ruff, isort passed on six changed evaluation Python files. Targeted
+  pytest test_evaluate.py, test_evaluate_tasks.py, test_evaluate_flow.py:
+  91 passed in 89.65s. Includes missing/superseded/fingerprint/strategy gate
+  rejection, matching provenance, one grouped_split call per flow, actual
+  artifact-tree sanity checks, source-derived rounds/weight, CSV-only probes,
+  undefined slice handling and deterministic retry success/failure.
+
+**Real verification/results supplied by the user:**
+- Full suite in WSL: 250 passed, 10 warnings in 173.95s. Existing Prefect
+  teardown logging error followed the passing summary, not a test failure.
+- evaluate_flow completed, evaluation run db09d4a9c99040b2aefd2d374982410c,
+  source 7189707b198f47748f89965712eee4bc. Rebuilt grouped split once:
+  train 176,219 / val 37,761 / test 37,761; split gate passed. Logged
+  fingerprint matches c11d9d38cc466510e85b156ddd32b37a385f7b0b1a4c406f9a936f3de4e326cd,
+  scale_pos_weight=167.63062200956938; saved model has 1886 physical trees.
+- Val-tuned threshold ~0.9943 (full precision in MLflow param); val P=1,
+  recall=0.26785714, F1=0.42253521, PR-AUC=0.31769897. Test P=1,
+  recall=0.26666667, F1=0.42105263, PR-AUC=0.32693638, ROC-AUC=0.78187269.
+  Test flag_rate=0.001588941: 60 predictions, all 60 leadership emails.
+  Non-leadership test P/R/F1=0, PR-AUC=0.032428728. The chosen operating
+  point recovers the leadership-label channel only; not true urgency detection.
+- Diagnostic trained 2000 rounds; at artifact iteration 1886, retrained val
+  PR-AUC=0.31769897 matches the saved artifact with initial/final gap ZERO.
+  deterministic_retry=False. The real multi-tree reproduction gate is verified.
+- Validation PR-AUC (all / non-leadership), prevalence=0.004350017240921992:
+  1: 0.293434 / 0.012428; 10: 0.298718 / 0.015195;
+  50: 0.268264 / 0.013039; 100: 0.299236 / 0.013758;
+  300: 0.315059 / 0.017861; 600: 0.321085 / 0.020168;
+  1000: 0.322375 / 0.020717; 1500: 0.317533 / 0.018612;
+  1886: 0.317699 / 0.018634; 2000: 0.317945 / 0.018763.
+  Non-leadership lift ranges ~2.86x to ~4.76x prevalence across these probes.
+- Pre-registered flattening/noise expectation is qualitatively supported:
+  the clean non-leadership curve is modest, non-monotonic and declines after
+  1000 among reported probes. Do not call 1000 the global optimum or select
+  a tree count. Residual signal remains subject to ADR-011 proxies; this does
+  not establish a causal proof that duplicates alone explained prior results.
+  Superseded metrics remain unsuitable for direct score comparisons.
+- Evidently 0/7 drifted, 50,000-row train reference vs 37,761 test rows.
+  The flow took ~4m08s; split rebuild alone took ~3m22s. Detailed profiling
+  remains pending; zero marginal feature drift does not resolve label leakage.
+- Confidence intervals / HTML report remain pending; no model replacement,
+  new variants, training changes, commit or push performed at this checkpoint.
+
+**Pending / exact next action:**
+> Await approval for the next step and/or Step 2b commit. Full suite and real
+> evaluation are verified; no rerun needed for unchanged code. Changes remain
+> UNCOMMITTED. Do not push, change training, select a tree count, promote a
+> model, add variants or write the HTML report without separate approval.
+
+---
+
 ### Session: 2026-10-06 (ADR-012 Step 2a — features and training wiring)
 **Stage:** Clean-data feature/training wiring implemented; evaluation Step 2b pending.
 

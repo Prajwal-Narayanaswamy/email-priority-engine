@@ -144,6 +144,7 @@ stopping metric is wired correctly (invoked every iteration, reported as the sol
 metric `f1_pos`); it did not run to completion and is not the basis for this ADR.
 
 ### ADR-010: behavioral-only is keyword-clean, leadership-leaky (amended 2026-10-06)
+See ADR-013: candidate designation superseded; behavioral-only is a serving/monitoring reference only.
 See ADR-012: all earlier performance metrics are superseded by confirmed duplicate leakage.
 `behavioral-only` (7 tabular features, no `urgency_keyword_count`, no subject TF-IDF)
 is clean of the KEYWORD channel but NOT of the leadership channel: it retains
@@ -191,6 +192,7 @@ would have added RANKING signal (F1@0.5 never improved, but PR-AUC might have)
 is tested by the diagnostic retrain, not by relitigating early stopping.
 
 ### ADR-011: third variant "no-label-inputs" (planned, not trained)
+See ADR-013: whether to pursue this variant remains a pending decision.
 A third training variant excluding every direct label input: 6 features —
 `sender_frequency`, `hour_of_day`, `day_of_week`, `subject_length`,
 `has_question_mark`, `thread_depth` (drops `sender_is_leadership` AND
@@ -275,6 +277,68 @@ choosing a tree count. Validation and test are thin (224/225 positives;
 than the explicitly approved runtime class-weight derivation, and variants.
 No training-v2 ADR, new variant, or model promotion in this pass. This ADR
 records the approved design only; pipeline code and stored models are unchanged.
+
+### ADR-013: Clean-split evaluation — behavioral-only is a reference, not a production candidate
+**Context:** ADR-012's deduplication and grouped split are implemented and
+verified. Clean behavioral-only training run `7189707b198f47748f89965712eee4bc`
+was evaluated in run `db09d4a9c99040b2aefd2d374982410c`. The split/provenance
+gate passed; the saved model contains 1,886 trees. Full suite verified in the
+user's WSL terminal: 250 passed.
+
+**Evidence:**
+- At the validation-selected threshold (~0.9943), the model flags exactly
+  the 60 leadership rows in BOTH validation and test, identical to the
+  leadership-only rule. Test precision=1.0, recall=0.267, F1=0.421,
+  flag rate=0.00159; validation F1=0.423. Non-leadership F1=0.
+- Non-leadership test PR-AUC=0.032 against prevalence ~0.0044 (about 7x
+  chance). Validation non-leadership probes range 0.012-0.021 against
+  prevalence 0.00435 (about 3-5x chance): weak behavioral ranking signal,
+  not useful non-leadership recall at the chosen operating point.
+- All-row validation PR-AUC: 0.293 at 1 tree, 0.322 at 1,000, 0.318 at
+  1,886. Validation ROC-AUC: 0.795 at 1 tree versus 0.786 at 1,886.
+  The tree-count curve is flat/non-monotonic rather than showing sustained
+  gains; small differences are treated as within noise, pending Step 2c
+  uncertainty estimates, not as established improvements.
+- A 2,000-round diagnostic without early stopping reproduced the artifact's
+  validation PR-AUC at 1,886 trees with gap ZERO; no deterministic retry.
+  Evidently reported 0/7 drifted columns with a 50k train reference versus test.
+- PRE-REGISTERED expectation: CONFIRMED descriptively. Non-leadership PR-AUC
+  at 1,000 trees fell from 0.643 on the superseded leaky split to ~0.021 on
+  the clean split, and the clean tree-count curve is flat. This historical
+  contrast is NOT a controlled comparison: validation set and scale_pos_weight
+  also changed (along with deduplicated training data/sender frequencies).
+  It does not prove duplicates alone caused the earlier climb. Leaky-run
+  scores remain superseded, not comparable current-performance benchmarks.
+
+**Decision:**
+- behavioral-only is NOT a production candidate for urgency prediction.
+  ADR-010's original candidate designation is superseded. It stays the
+  reference model for the serving and monitoring stages, explicitly documented
+  as reproducing the leadership half of the label rule plus weak behavioral
+  signal. Reference status does not establish genuine urgency prediction.
+- F1 ~0.42 must NEVER be quoted without the leadership-only-rule baseline,
+  its identical predictions at this threshold, and non-leadership F1=0.
+- Training-v2 with early stopping on PR-AUC is NOT pursued: there is no
+  convincing evidence that more trees help. Do not select a new tree count,
+  replace the saved model, or change early stopping based on this curve.
+- Variant 3 (ADR-011, no-label-inputs): decision pending; no implementation
+  or training authorized by this ADR.
+
+**Consequences:** Proceed with uncertainty reporting in Step 2c before final
+evaluation claims. Serving and monitoring may demonstrate the MLOps stack
+using this documented reference model; they must preserve its limitations
+and label-rule baseline. This decision does not itself implement those stages.
+
+**Known limitations:**
+- Only about 164 non-leadership positives per held-out split (164 validation,
+  165 test). Confidence intervals are not yet available (Step 2c), so
+  "within noise" is a conservative working interpretation, not a measured
+  significance test or proof that tree counts are equivalent.
+- Rows within a sender/subject group are correlated; uncertainty estimates
+  must account for that dependence rather than assuming independent emails.
+- Heuristic labels, leadership-label leakage, potential sender-frequency and
+  subject-length proxies (ADR-011), cross-sender subject overlap, and frequency
+  computed using held-out emails remain as disclosed in ADR-012.
 
 ## Feature Hypotheses
 Every feature requires a hypothesis before implementation. Validate in EDA notebook.
