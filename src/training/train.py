@@ -37,10 +37,6 @@ import matplotlib.pyplot as plt  # noqa: E402  (backend must be set first)
 TARGET: str = "priority"
 SUBJECT: str = "subject"
 
-# 513,875 negatives / 3,526 positives = 145.74. Fixed rather than derived at
-# runtime so the imbalance handling is explicit and locked by a test.
-SCALE_POS_WEIGHT: float = 145.7
-
 SPLIT_SEED: int = 42
 SPLIT_FRACTIONS: tuple[float, float, float] = (0.70, 0.15, 0.15)
 
@@ -199,19 +195,37 @@ def build_matrices(
     return hstack([tabular, tfidf], format="csr")
 
 
+def scale_pos_weight_from_labels(y_train: pd.Series | np.ndarray) -> float:
+    """Derive class imbalance from training labels only (ADR-012).
+
+    Returns negatives / positives; reject empty, non-binary, or single-class
+    labels rather than training with an undefined or zero class weight.
+    """
+    labels = np.asarray(y_train).ravel()
+    if labels.size == 0 or not np.all(np.isin(labels, (0, 1))):
+        raise ValueError("scale_pos_weight requires nonempty binary 0/1 labels")
+    positives = int((labels == 1).sum())
+    negatives = int((labels == 0).sum())
+    if positives == 0 or negatives == 0:
+        raise ValueError("scale_pos_weight requires both training classes")
+    return float(negatives / positives)
+
+
 def build_model(
     *,
-    scale_pos_weight: float = SCALE_POS_WEIGHT,
+    scale_pos_weight: float = 1.0,
     n_estimators: int = 2000,
     learning_rate: float = 0.05,
     num_leaves: int = 31,
     random_state: int = SPLIT_SEED,
     n_jobs: int = -1,
 ) -> LGBMClassifier:
-    """Build the LightGBM binary classifier for the 0.68%-positive target.
+    """Build the LightGBM binary classifier with an explicit imbalance weight.
 
     `scale_pos_weight` is the only imbalance lever — `class_weight` is left at
     its default because setting both double-counts the same correction.
+    Training tasks supply the ratio derived from their training labels; the
+    standalone builder defaults to neutral weighting, not a dataset constant.
     No feature scaling: trees are invariant to monotone feature transforms.
 
     `metric="None"` disables LightGBM's built-in metrics. They must be off, or

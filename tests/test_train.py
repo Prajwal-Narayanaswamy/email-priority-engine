@@ -12,7 +12,6 @@ from scipy.sparse import csr_matrix, issparse
 from src.features.features import FEATURE_COLUMNS, fit_subject_vectorizer
 from src.training.train import (
     BEHAVIORAL_FEATURES,
-    SCALE_POS_WEIGHT,
     SPLIT_SEED,
     VARIANTS,
     build_matrices,
@@ -21,6 +20,7 @@ from src.training.train import (
     evaluate,
     feature_importance_frame,
     plot_feature_importance,
+    scale_pos_weight_from_labels,
     stratified_split,
     train_model,
     variant_by_name,
@@ -181,11 +181,18 @@ def test_build_matrices_requires_vectorizer(feature_frame: pd.DataFrame) -> None
 # --------------------------------------------------------------------------
 
 
-def test_build_model_uses_required_scale_pos_weight() -> None:
-    """Regression lock on the non-negotiable imbalance weight."""
-    model = build_model()
-    assert SCALE_POS_WEIGHT == 145.7
-    assert model.get_params()["scale_pos_weight"] == 145.7
+def test_build_model_uses_weight_derived_from_training_labels() -> None:
+    """Hand-made training labels have three negatives per positive."""
+    train = pd.DataFrame({"priority": [0, 0, 1, 0]})
+    weight = scale_pos_weight_from_labels(train["priority"])
+    assert weight == 3.0
+    assert build_model(scale_pos_weight=weight).get_params()["scale_pos_weight"] == 3.0
+
+
+@pytest.mark.parametrize("labels", [[], [0, 0], [1, 1], [0, 2]])
+def test_scale_pos_weight_rejects_undefined_training_ratio(labels: list[int]) -> None:
+    with pytest.raises(ValueError, match="scale_pos_weight"):
+        scale_pos_weight_from_labels(np.array(labels))
 
 
 def test_build_model_does_not_double_count_with_class_weight() -> None:

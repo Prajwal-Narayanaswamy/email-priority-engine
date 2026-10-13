@@ -20,7 +20,12 @@ from src.tasks.train_tasks import (
     load_features_task,
     train_variant_task,
 )
-from src.training.train import SCALE_POS_WEIGHT
+from src.training.splits import (
+    SPLIT_STRATEGY,
+    SPLIT_VERSION,
+    grouped_split,
+    split_fingerprint,
+)
 from tests.conftest import FEATURE_POSITIVES, FEATURE_ROWS
 
 N_ROWS = FEATURE_ROWS
@@ -56,6 +61,8 @@ def test_load_features_task_reads_only_needed_columns(
 ) -> None:
     df = load_features_task.fn(features_parquet)
     assert set(df.columns) == {
+        "uid",
+        "from",
         "subject",
         "priority",
         "sender_frequency",
@@ -182,15 +189,55 @@ def test_train_flow_loads_dotenv_before_importing_train_tasks(
         monkeypatch.delenv("MLFLOW_TRACKING_URI")
 
 
-def test_train_variant_task_logs_required_scale_pos_weight(
+def test_train_variant_task_logs_derived_scale_pos_weight(
     features_parquet: Path, quiet_logger: None, mock_mlflow: MagicMock
 ) -> None:
     df = load_features_task.fn(features_parquet, limit=200)
     train_variant_task.fn(df, "behavioral-only", n_estimators=20)
 
     params = mock_mlflow.log_params.call_args[0][0]
-    assert params["scale_pos_weight"] == SCALE_POS_WEIGHT == 145.7
+    train, _, _ = grouped_split(df)
+    positives = int((train["priority"] == 1).sum())
+    negatives = int((train["priority"] == 0).sum())
+    assert params["scale_pos_weight"] == negatives / positives
     assert params["primary_metric"] == "class_1_f1"
+
+
+@pytest.mark.parametrize("variant", ["behavioral-only", "with-keyword-features"])
+def test_training_logs_shared_grouped_split_and_passes_derived_weight(
+    features_parquet: Path,
+    quiet_logger: None,
+    mock_mlflow: MagicMock,
+    monkeypatch: pytest.MonkeyPatch,
+    variant: str,
+) -> None:
+    df = load_features_task.fn(features_parquet)
+    expected_splits = grouped_split(df, seed=42)
+    build = MagicMock(wraps=train_tasks.build_model)
+    monkeypatch.setattr(train_tasks, "build_model", build)
+    result = train_variant_task.fn(df, variant, n_estimators=20)
+    params = mock_mlflow.log_params.call_args.args[0]
+    assert params["split_strategy"] == SPLIT_STRATEGY
+    assert params["split_version"] == SPLIT_VERSION
+    assert params["seed"] == params["split_seed"] == 42
+    assert params["dedupe_policy"] == "exact (from, subject, date), keep first"
+    assert params["split_fingerprint"] == split_fingerprint(*expected_splits)
+    assert result["split_fingerprint"] == params["split_fingerprint"]
+    for name, part in zip(("train", "val", "test"), expected_splits):
+        assert params[f"{name}_rows"] == len(part)
+        assert params[f"{name}_positives"] == int(part["priority"].sum())
+    labels = expected_splits[0]["priority"]
+    expected_weight = float((labels == 0).sum() / (labels == 1).sum())
+    assert params["scale_pos_weight"] == expected_weight
+    assert build.call_args.kwargs["scale_pos_weight"] == expected_weight
+
+
+def test_training_smoke_sample_keeps_unique_uids(
+    features_parquet: Path,
+    quiet_logger: None,
+) -> None:
+    sample = load_features_task.fn(features_parquet, limit=100)
+    assert sample["uid"].is_unique
 
 
 def test_train_variant_task_logs_class_one_metrics(

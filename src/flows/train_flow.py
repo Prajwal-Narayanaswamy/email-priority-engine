@@ -39,8 +39,8 @@ def train_flow(
 ) -> list[dict[str, Any]]:
     """Train every requested variant, logging each as its own MLflow run.
 
-    Both variants share one 70/15/15 stratified split (same seed), so the
-    difference in score is attributable to the feature set and not to sampling
+    Both variants replay the same ADR-012 grouped 14/3/3-fold split (same seed),
+    so the difference in score is attributable to the feature set and not to sampling
     luck. `with-keyword-features` is expected to score higher for the reason
     documented in `train.LIMITATION_NOTE` — label leakage, not better modelling.
 

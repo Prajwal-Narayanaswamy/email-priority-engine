@@ -80,7 +80,13 @@ def tiny_model(eval_splits: dict[str, pd.DataFrame]):
         train_df, feature_columns=BEHAVIORAL_FEATURES, use_tfidf=False
     )
     x_val = build_matrices(val_df, feature_columns=BEHAVIORAL_FEATURES, use_tfidf=False)
-    model = build_model(n_estimators=20, random_state=42)
+    # Preserve this legacy diagnostic fixture's source-run parameters; the
+    # standalone builder no longer defaults to a dataset-specific weight.
+    model = build_model(
+        n_estimators=20,
+        random_state=42,
+        scale_pos_weight=float(DIAG_PARAMS["scale_pos_weight"]),
+    )
     model, _ = train_model(
         model,
         x_train,

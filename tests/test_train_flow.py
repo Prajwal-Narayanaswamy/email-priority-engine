@@ -66,6 +66,8 @@ def test_train_flow_shares_one_split_across_variants(
     first, second = results
     for key in ("train_rows", "val_rows", "test_rows"):
         assert first[key] == second[key]
+    assert first["split_fingerprint"] == second["split_fingerprint"]
+    assert first["scale_pos_weight"] == second["scale_pos_weight"]
 
 
 def test_train_flow_behavioral_variant_has_fewer_columns(

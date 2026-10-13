@@ -8,6 +8,7 @@ import pandas as pd
 from prefect import get_run_logger, task
 
 from src.features.features import KEEP_COLUMNS, engineer_features
+from src.training.splits import dedupe_exact_keys
 
 
 @task
@@ -21,13 +22,19 @@ def feature_engineering_task(
     Reads only the light columns (uid, from, subject, date, priority) so the
     511MB body column never enters memory (ADR-008). TF-IDF is intentionally
     not applied here — train_flow fits/transforms on train/test splits only.
+    Exact raw sender/subject/date deduplication happens before engineering
+    (ADR-012), so sender_frequency counts unique emails.
     """
     logger = get_run_logger()
     logger.info("Reading %s (columns only)...", input_path)
     df = pd.read_parquet(input_path, columns=list(KEEP_COLUMNS))
     if limit is not None:
         df = df.head(limit)
-    logger.info("Read %d rows; engineering features...", len(df))
+    rows_before = len(df)
+    df = dedupe_exact_keys(df)
+    logger.info(
+        "Deduplicated %d -> %d rows; engineering features...", rows_before, len(df)
+    )
     engineered = engineer_features(df)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     engineered.to_parquet(output_path, index=False)

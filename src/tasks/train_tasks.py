@@ -17,9 +17,14 @@ import pandas as pd
 from prefect import get_run_logger, task
 
 from src.features.features import FEATURE_COLUMNS, fit_subject_vectorizer
+from src.training.splits import (
+    SPLIT_STRATEGY,
+    SPLIT_VERSION,
+    grouped_split,
+    split_fingerprint,
+)
 from src.training.train import (
     LIMITATION_NOTE,
-    SCALE_POS_WEIGHT,
     SPLIT_SEED,
     SUBJECT,
     TARGET,
@@ -28,7 +33,7 @@ from src.training.train import (
     evaluate,
     feature_importance_frame,
     plot_feature_importance,
-    stratified_split,
+    scale_pos_weight_from_labels,
     train_model,
     variant_by_name,
 )
@@ -50,6 +55,7 @@ EXPERIMENT_NAME: str = os.environ.get(
 # database. Export MLFLOW_TRACKING_URI to override.
 TRACKING_URI: str = os.environ.get("MLFLOW_TRACKING_URI", _DEFAULT_URI)
 MIN_POSITIVE_IN_SAMPLE: int = 20
+DEDUPE_POLICY: str = "exact (from, subject, date), keep first"
 
 # MLflow 3.x serialises sklearn objects via skops, which refuses to write any
 # type that is not explicitly declared trusted. These are exactly the types this
@@ -69,8 +75,9 @@ def load_features_task(
 ) -> pd.DataFrame:
     """Read the feature parquet, optionally as a stratified subsample.
 
-    Reads only the columns training needs (subject, target, 8 features) so
-    `uid`, `from`, and `date` are never materialised.
+    Reads uid/from/subject for grouped splitting and membership fingerprints,
+    plus target and 8 features. Body and date are not needed in training;
+    exact deduplication already occurred before feature engineering.
 
     When `limit` is set the sample is stratified on the target rather than a
     head slice: the parquet is in ingest order, so the first N rows are not
@@ -79,7 +86,7 @@ def load_features_task(
     `MIN_POSITIVE_IN_SAMPLE` positives so the split has enough of the class.
     """
     logger = get_run_logger()
-    column_names = [SUBJECT, TARGET, *FEATURE_COLUMNS]
+    column_names = ["uid", "from", SUBJECT, TARGET, *FEATURE_COLUMNS]
 
     logger.info("Reading %s (columns: %s)...", input_path, len(column_names))
     df = pd.read_parquet(input_path, columns=column_names)
@@ -97,7 +104,7 @@ def load_features_task(
     have = int((sampled[TARGET] == 1).sum())
     if have < MIN_POSITIVE_IN_SAMPLE:
         shortfall = MIN_POSITIVE_IN_SAMPLE - have
-        positives = df[df[TARGET] == 1]
+        positives = df[df[TARGET] == 1].drop(index=sampled.index, errors="ignore")
         top_up = min(shortfall, len(positives))
         logger.info(
             "Sample had only %d positives; topping up %d to reach %d",
@@ -159,7 +166,9 @@ def train_variant_task(
     mlflow.set_tracking_uri(TRACKING_URI)
     mlflow.set_experiment(EXPERIMENT_NAME)
 
-    train_df, val_df, test_df = stratified_split(df, seed=seed)
+    train_df, val_df, test_df = grouped_split(df, seed=seed)
+    scale_pos_weight = scale_pos_weight_from_labels(train_df[TARGET])
+    fingerprint = split_fingerprint(train_df, val_df, test_df)
     logger.info(
         "Split -> train %d / val %d / test %d rows",
         len(train_df),
@@ -195,7 +204,7 @@ def train_variant_task(
     logger.info("Matrix shape: %d x %d", *X_train.shape)
 
     model = build_model(
-        scale_pos_weight=SCALE_POS_WEIGHT,
+        scale_pos_weight=scale_pos_weight,
         n_estimators=n_estimators,
         learning_rate=learning_rate,
         num_leaves=num_leaves,
@@ -236,7 +245,7 @@ def train_variant_task(
     params: dict[str, Any] = {
         "variant": variant.name,
         "seed": seed,
-        "scale_pos_weight": SCALE_POS_WEIGHT,
+        "scale_pos_weight": scale_pos_weight,
         "n_estimators": n_estimators,
         "learning_rate": learning_rate,
         "num_leaves": num_leaves,
@@ -249,6 +258,10 @@ def train_variant_task(
         "primary_metric": "class_1_f1",
         "lib_lightgbm": _lightgbm_version(),
         "split_seed": seed,
+        "split_strategy": SPLIT_STRATEGY,
+        "split_version": SPLIT_VERSION,
+        "dedupe_policy": DEDUPE_POLICY,
+        "split_fingerprint": fingerprint,
     }
     for split_name, split_df in (
         ("train", train_df),
@@ -307,6 +320,8 @@ def train_variant_task(
         "train_rows": len(train_df),
         "val_rows": len(val_df),
         "test_rows": len(test_df),
+        "split_fingerprint": fingerprint,
+        "scale_pos_weight": scale_pos_weight,
         "val_f1": float(val_scores["f1"]),
         "val_precision": float(val_scores["precision"]),
         "val_recall": float(val_scores["recall"]),
