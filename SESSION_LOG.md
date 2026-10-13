@@ -7,6 +7,75 @@ Be specific. "Worked on features" is useless. "Ran feature_flow.py, got KeyError
 sender column, traced to ingest output missing sender_email field" is useful.
 ---
 
+### Session: 2026-10-06 (ADR-012 Step 2a — features and training wiring)
+**Stage:** Clean-data feature/training wiring implemented; evaluation Step 2b pending.
+
+**What I completed:**
+- User verified Step 1 on real data: grouped_split reproduces ADR-012 rows
+  176,219 / 37,761 / 37,761, positives 1,045 / 224 / 225, leadership positives
+  175 / 60 / 60, zero group and UID overlap, and stable fingerprint.
+- feature_engineering_task now applies dedupe_exact_keys BEFORE engineer_features.
+  Output retains uid, raw from, subject, date, priority, and all feature columns;
+  body is never loaded. Sender frequency counts unique emails.
+- Training loader retains uid/from/subject/priority plus feature columns, no body.
+  Training variants replay grouped_split with the same input and seed, and log
+  split_strategy, split_version, seed/split_seed, dedupe_policy="exact (from,
+  subject, date), keep first", split_fingerprint, and existing per-split row /
+  positive count names.
+- Removed the production hard-coded 145.7 constant and its regression lock.
+  scale_pos_weight_from_labels derives train negatives / positives at runtime;
+  each variant passes and logs its own training split's ratio. Standalone model
+  builder uses neutral 1.0 unless a weight is supplied. Actual training always
+  supplies the derived weight. Early stopping and other model settings unchanged.
+- Fixed smoke-sample positive top-ups to exclude already selected indices;
+  avoids duplicated UIDs in the grouped split.
+- Added feature-task tests (dedupe before frequency, metadata retention, limit),
+  training split/provenance/weight tests for both variants, hand-computed 3:1
+  weight and undefined-ratio tests; flow asserts matching variant fingerprints.
+  Legacy evaluation-task test fixture explicitly passes its original source-run
+  weight after removal of the builder's dataset-specific default.
+- Black, ruff, isort passed on changed Python files. Targeted pytest:
+  test_feature_tasks.py, test_features_flow.py, test_train.py,
+  test_train_tasks.py, test_train_flow.py, test_evaluate_tasks.py:
+  113 passed in 180.16s. Dependency warnings and Prefect teardown logging noise
+  remain after the passing summary. Full suite NOT run in OpenCode.
+
+**FIRST clean-split baseline — executed and verified in the user's WSL terminal:**
+- Full suite: 235 passed in 176.93s (~177s). Seven old runs tagged
+  superseded=duplicate-leaky-split BEFORE new training. feature_flow wrote
+  251,741 rows x 13 columns after deduplicating 517,401 inputs.
+- Both training variants completed with train / val / test rows
+  176,219 / 37,761 / 37,761, matching ADR-012.
+- with-keyword-features run `61bdd9148e334df9be28e52b0bc11b58`:
+  test F1 1.0000, best_iteration 1. The ~1.0 score still reproduces label
+  inputs, so ADR-009 stands; deduplication does not remove direct label leakage.
+- behavioral-only run `7189707b198f47748f89965712eee4bc`:
+  best_iteration 1886; val F1 0.2204, precision 0.1594, recall 0.3571;
+  test F1 0.2152, precision 0.1589, recall 0.3333, ROC-AUC 0.7819.
+  All at default threshold 0.5, not a tuned operating point. No confidence
+  intervals or clean-split evaluation/diagnostic results yet (Step 2b pending).
+- This is the FIRST clean-split training baseline, NOT comparable to the
+  superseded runs: data, split, scale_pos_weight and best_iteration changed.
+  The PRE-REGISTERED expectation remains UNTESTED until the non-leadership
+  diagnostic runs on the clean split; do not infer its PR-AUC from training F1.
+- grouped_split took about 3 minutes per call. train_flow called it twice,
+  inside each variant task; equal fingerprints prove equal membership, not
+  that the split was computed only once. Profiling remains read-only and pending.
+- The diagnostic reproduction gate in Step 2b must compare retrained tree 1
+  to the saved model explicitly scored with num_iteration=1, not its default
+  1886-tree score. Its prior single-tree-artifact assumption no longer applies.
+
+**Pending / exact next action:**
+> Step 2a code/tests committed as ce53d6c; this baseline is recorded separately.
+> Run the printed grouped_split timing breakdown in WSL and paste the results;
+> then approve Step 2b before wiring evaluation. Prefer one split computation
+> per flow and reuse its frames rather than introducing a persistent cache.
+> Evaluation source is untouched and is expected to fail on new data until
+> Step 2b. Do not rerun the old-run tagging block after new runs exist. No push,
+> feature-definition, early-stopping, variant, promotion, or training-v2 ADR change.
+
+---
+
 ### Session: 2026-10-06 (ADR-012 Step 1 — pure split module)
 **Stage:** Evaluation/data-split redesign — pure module; pipeline wiring pending.
 
