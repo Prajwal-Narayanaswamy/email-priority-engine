@@ -281,9 +281,10 @@ records the approved design only; pipeline code and stored models are unchanged.
 ### ADR-013: Clean-split evaluation — behavioral-only is a reference, not a production candidate
 **Context:** ADR-012's deduplication and grouped split are implemented and
 verified. Clean behavioral-only training run `7189707b198f47748f89965712eee4bc`
-was evaluated in run `db09d4a9c99040b2aefd2d374982410c`. The split/provenance
-gate passed; the saved model contains 1,886 trees. Full suite verified in the
-user's WSL terminal: 250 passed.
+was first evaluated in run `db09d4a9c99040b2aefd2d374982410c`; Step 2c run
+`559ccf6356494eecabb332c47eff2105` adds the baseline and cluster intervals.
+The split/provenance gate passed; the saved model contains 1,886 trees.
+Full suite verified in the user's WSL terminal: 263 passed.
 
 **Evidence:**
 - At the validation-selected threshold (~0.9943), the model flags exactly
@@ -297,8 +298,9 @@ user's WSL terminal: 250 passed.
 - All-row validation PR-AUC: 0.293 at 1 tree, 0.322 at 1,000, 0.318 at
   1,886. Validation ROC-AUC: 0.795 at 1 tree versus 0.786 at 1,886.
   The tree-count curve is flat/non-monotonic rather than showing sustained
-  gains; small differences are treated as within noise, pending Step 2c
-  uncertainty estimates, not as established improvements.
+  gains; small differences are treated as within noise, not as established
+  improvements. No paired tree-count comparison has been performed; Step 2c's
+  intervals compare the saved model against the rule, not different tree counts.
 - A 2,000-round diagnostic without early stopping reproduced the artifact's
   validation PR-AUC at 1,886 trees with gap ZERO; no deterministic retry.
   Evidently reported 0/7 drifted columns with a 50k train reference versus test.
@@ -324,18 +326,45 @@ user's WSL terminal: 250 passed.
 - Variant 3 (ADR-011, no-label-inputs): decision pending; no implementation
   or training authorized by this ADR.
 
-**Consequences:** Proceed with uncertainty reporting in Step 2c before final
-evaluation claims. Serving and monitoring may demonstrate the MLOps stack
+**Step 2c uncertainty results:** Test-only 95% percentile cluster bootstrap,
+1,000 resamples, seed 42, 26,676 `(from, normalized subject)` groups; zero
+skipped resamples for all metrics. Threshold fixed at 0.9943359717873594.
+
+| Test metric | Point estimate | 95% cluster interval |
+|---|---:|---|
+| Precision | 1.000 | [1.000, 1.000] |
+| Recall | 0.267 | [0.114, 0.480] |
+| F1 | 0.421 | [0.205, 0.649] |
+| All-row PR-AUC | 0.327 | [0.188, 0.514] |
+| Non-leadership PR-AUC | 0.032 | [0.006, 0.087] |
+
+Non-leadership prevalence is ~0.0044. Leadership-only baseline: F1=0.421,
+PR-AUC=0.271. Paired model-minus-baseline F1=0.000 [0.000, 0.000]
+(identical predictions); PR-AUC=+0.056 [+0.013, +0.104]. Precision=1 with
+interval [1,1] is by construction for these leadership-only predictions,
+since leadership implies priority in the heuristic labels, not evidence of
+perfect urgency recognition. The positive paired PR-AUC interval supports
+ranking value over this rule under the specified resampling procedure.
+
+Ranking value over the rule is supported, but no usable operating point exists
+past the leadership rows. At the chosen threshold non-leadership recall/F1
+remain zero; ranking improvement does not add classification gain here.
+
+**Consequences:** Serving and monitoring may demonstrate the MLOps stack
 using this documented reference model; they must preserve its limitations
 and label-rule baseline. This decision does not itself implement those stages.
 
 **Known limitations:**
 - Only about 164 non-leadership positives per held-out split (164 validation,
-  165 test). Confidence intervals are not yet available (Step 2c), so
-  "within noise" is a conservative working interpretation, not a measured
-  significance test or proof that tree counts are equivalent.
-- Rows within a sender/subject group are correlated; uncertainty estimates
-  must account for that dependence rather than assuming independent emails.
+  165 test); the measured recall/F1 and non-leadership AP intervals are wide.
+- Intervals condition on the saved model and fixed validation-selected
+  threshold. They do not cover training or threshold-selection variability,
+  and precision [1,1] is not a future-email precision guarantee.
+- No paired tree-count comparison was done. "Within noise" remains a working
+  interpretation of the validation curve, not a significance test or proof
+  that tree counts are equivalent; these model-vs-rule CIs do not change that.
+- Rows within sender/subject groups are correlated; the measured intervals
+  resample whole groups rather than treating individual emails as independent.
 - Heuristic labels, leadership-label leakage, potential sender-frequency and
   subject-length proxies (ADR-011), cross-sender subject overlap, and frequency
   computed using held-out emails remain as disclosed in ADR-012.

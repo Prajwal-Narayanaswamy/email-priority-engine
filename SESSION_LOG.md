@@ -7,6 +7,94 @@ Be specific. "Worked on features" is useless. "Ran feature_flow.py, got KeyError
 sender column, traced to ingest output missing sender_email field" is useful.
 ---
 
+### Session: 2026-10-12 (Step 2c — baseline and cluster CIs committed)
+**Stage:** Evaluation uncertainty verified in WSL and recorded in ADR-013.
+
+**What I completed:**
+- Step 2c code/tests committed as b1d1c51 after confirming only the expected
+  files and SESSION_LOG.md were uncommitted. No .env/logs staged; no push.
+- Added pure src/evaluation/uncertainty.py: binary leadership-only baseline
+  P/R/F1/PR-AUC and test-only paired cluster-bootstrap percentile intervals.
+  Model scores are sorted once; integer group-multiplicity weights exactly
+  represent whole-cluster replacement draws without row expansion or repeated
+  sorting. Weighted AP checked against sklearn on explicit expanded toy clusters.
+- B=1000, seed=42, 95% percentile bounds. Shared draws for model and baseline;
+  non-leadership slice uses the same cluster weights. The val-chosen threshold
+  is fixed throughout, no re-fitting, threshold tuning or extra predictions.
+- Intervals for f1, precision, recall, pr_auc, nolead_pr_auc, paired
+  model_minus_baseline_f1 and model_minus_baseline_pr_auc. Undefined resamples
+  skipped per metric; no-positive draws are undefined, precision also requires
+  predictions, and nolead PR-AUC needs positive slice labels. All-undefined
+  bounds are None/omitted from numeric logging; each ci95_<metric>_skipped logs
+  its count. These intervals condition on the fixed model/selected threshold.
+- evaluate_variant_task logs baseline_leadership_* and model-minus-baseline
+  point differences, ci95_<metric>_lo/_hi, skips, and bootstrap method/B/seed/
+  group count/scope. Reuses loaded test frame and existing test scores; returns
+  baseline/CI summary. No new split computation or bootstrap CSV artifact.
+- Extracted group_keys in src/training/splits.py from the existing group-key
+  expression; grouped_split uses the same raw-sender/normalized-subject keys
+  and same fold assignment policy. Only this requested helper extraction touches
+  the training namespace; training tasks/model settings/features are unchanged.
+- Added test_uncertainty.py, shared-key tests in test_splits.py, and mocked
+  MLflow baseline/CI logging test. Covers whole-group multiplicities, seeded
+  reproducibility, paired differences, frozen threshold, simple-case coverage,
+  skip counts/all-undefined handling, sklearn tie-aware AP equivalence, and
+  reuse of test predictions. Existing split-call-count regression also passed.
+- Black, ruff and isort passed. Targeted uncertainty/splits/evaluation tasks/
+  flow tests: 85 passed in 157.42s. After avoiding BLAS overhead in AP sums,
+  affected uncertainty/task tests: 58 passed in 22.08s. Full suite not run here.
+
+**Real verification supplied by the user:**
+- WSL full suite: 263 passed, 10 warnings in 185.50s. Known Prefect teardown
+  logging error appeared after the passing summary; not a test failure.
+- Evaluation run 559ccf6356494eecabb332c47eff2105 FINISHED, source
+  7189707b198f47748f89965712eee4bc. Fingerprint remains
+  c11d9d38cc466510e85b156ddd32b37a385f7b0b1a4c406f9a936f3de4e326cd.
+  Grouped split once, artifact 1886 trees, reproduction gap ZERO, no retry,
+  Evidently 0/7. Whole flow ~3m53s; split ~3m10s.
+- Bootstrap: 1000 draws, seed 42, 26,676 test clusters, fixed threshold
+  0.9943359717873594. Actual bootstrap time 1.65s, comfortably below 3 minutes.
+  Zero skipped draws for all seven metrics.
+- Test model point / 95% percentile cluster interval:
+  precision 1.0 [1.0, 1.0]; recall 0.266667 [0.114265, 0.480428];
+  F1 0.421053 [0.205096, 0.649039]; all-row PR-AUC 0.326936
+  [0.187937, 0.513998]; non-leadership PR-AUC 0.032429
+  [0.005705, 0.087232].
+  Rounded report values: recall 0.267 [0.114, 0.480], F1 0.421 [0.205, 0.649],
+  all-row PR-AUC 0.327 [0.188, 0.514], non-leadership PR-AUC 0.032
+  [0.006, 0.087] vs prevalence ~0.0044. Precision's 1.0 [1.0, 1.0] is by
+  construction because observed predictions are leadership-only and leadership
+  implies priority in these labels, not independent urgency ground truth.
+- Leadership-only baseline: precision 1.0, recall 0.266667, F1 0.421053,
+  PR-AUC 0.271036. Paired model-minus-baseline F1=0, CI [0, 0]; paired
+  PR-AUC difference=0.055900, CI [0.012837, 0.103539]. The positive paired
+  AP interval supports ranking improvement over this baseline under the
+  specified bootstrap, but there is no operating-point classification gain.
+  Rounded paired differences: F1 0.000 [0.000, 0.000] (identical predictions),
+  PR-AUC +0.056 [+0.013, +0.104].
+- Precision's [1,1] and F1 difference's [0,0] reflect the observed rule-like
+  predictions under fixed model/threshold resampling, not guarantees for
+  future emails. Recall/F1 and non-leadership AP remain highly uncertain.
+  CIs condition on this model and val-chosen threshold, not training or
+  threshold-selection variability. No evidence here compares tree counts;
+  ADR-013 decisions and non-production status remain unchanged.
+- The prior evaluation's superseded=rerun-with-ci tagging command output was
+  not included in the supplied transcript; that tag is not independently
+  confirmed at this checkpoint. No tag mutations performed in OpenCode.
+- Updated ADR-013 with Step 2c results, replacing the stale no-CIs limitation.
+  Ranking value over the rule is supported, but no usable operating point
+  exists past the leadership rows under the current selected-threshold result.
+  CIs are conditional on the saved model/fixed val threshold and are not a
+  paired tree-count comparison. No training/model/split/variant changes.
+
+**Pending / exact next action:**
+> Await next-stage approval; no rerun needed for unchanged code. Confirm prior
+> db09d4a9c99040b2aefd2d374982410c supersession tag if not already applied.
+> Code/tests and documentation are recorded in separate commits. No push,
+> model/training changes or HTML report work without separate approval.
+
+---
+
 ### Session: 2026-10-12 (Step 2b committed; ADR-013 clean-split decision)
 **Stage:** Clean-split evaluation complete; uncertainty reporting (Step 2c) pending.
 
