@@ -7,6 +7,34 @@ Be specific. "Worked on features" is useless. "Ran feature_flow.py, got KeyError
 sender column, traced to ingest output missing sender_email field" is useful.
 ---
 
+### Session: 2026-10-13 (Recruiter documentation corrected)
+**Stage:** Measured evaluation documented; serving/monitoring/ML deployment still roadmap.
+
+**What I completed:**
+- Added only a top-of-ADR-010 status line, "Superseded by ADR-013", preserving
+  every original architecture line. Committed as 07057ff.
+- Rewrote PROJECT_NARRATIVE.md from ADR-001 through ADR-013 and the recorded
+  runs: ingestion failures/fixes, heuristic labels, three diagnostic-discovered
+  leaks, dedupe/grouped splitting, leadership baseline, conditional cluster CIs,
+  corrections ledger, concept explanations, two-minute pitch and eight FAQ answers.
+- Created recruiter README with raw vs clean counts, actual implemented stages,
+  five measured findings, results paired with the rule baseline/intervals,
+  existing feature_flow/train_flow/evaluate_flow CLI options, and source/run IDs.
+- Both docs mark serving, live monitoring, CI/CD for ML and ONNX as NOT STARTED;
+  variant 3 deferred/not built. No production urgency claim. Keyword diagnostic
+  and invalid legacy scores have explicitly unestimated intervals rather than
+  fabricated uncertainty. F1 benchmark reporting includes the leadership rule.
+- CLI options inspected in source; docs reviewed against recorded measurements.
+  No code/data/model/ADR-decision changes or tests/full-suite runs performed.
+  Last code verification remains 263 passed in WSL; docs-only scope, no push.
+
+**Next session — exact first action:**
+> Await approval of the next stage. Serving and monitoring use only the
+> documented reference model under ADR-013; do not start them or an HTML
+> evaluation report, new variant or model change without separate approval.
+
+---
+
 ### Session: 2026-10-12 (Step 2c — baseline and cluster CIs committed)
 **Stage:** Evaluation uncertainty verified in WSL and recorded in ADR-013.
 

@@ -1,238 +1,324 @@
 # Project Narrative — Email Priority Engine
 
-*Recruiter / interview-prep document. Every number below is from the actual
-pipeline run; you can defend all of it.*
+Recruiter and interview-prep account of the implemented pipeline and measured
+results. Decision history is in [ARCHITECTURE.md](ARCHITECTURE.md); run evidence
+and corrections are in [SESSION_LOG.md](SESSION_LOG.md).
 
----
+## 1. The pipeline and the two ingestion failures
 
-## 1. What problem this solves
+This project studies email-priority modeling on Enron through a local,
+reproducible experiment pipeline. Enterprise inbox triage motivates the task,
+but the measured target is a heuristic label, not independently judged urgency.
+Ingestion, labeling, features, training, and evaluation are implemented.
+Serving, live monitoring, ML deployment automation, and ONNX export are roadmap
+items, not completed components.
 
-Enterprise inboxes flood people with thousands of emails a day, and the
-time-sensitive ones get buried. This project builds an end-to-end MLOps
-pipeline that reads raw email archives and predicts whether each message is
-"priority" — something that needs action today — so a real-time service could
-triage an inbox automatically. It's the full machine-learning production stack,
-not a notebook: streaming data ingestion, feature engineering, model training
-with experiment tracking, a serving API, drift monitoring, and CI/CD. Everything
-runs locally with no cloud inference and no external APIs, so the email data
-never leaves the machine.
+The pipeline starts with the email archive and writes a labeled Parquet file.
+The original full ingestion completed with **517,401 emails, zero dropped**,
+in about **22 minutes**. Two failures changed its design:
 
-## 2. Why the Enron dataset
+- **OOM:** on the 5.6GB host, the first implementation held raw records,
+  validated records, and a DataFrame in memory simultaneously. The process was
+  killed. The replacement streams records into a pyarrow ParquetWriter in
+  50,000-row batches, bounding the record buffer instead of materializing the
+  full corpus three times.
+- **CPython header parsing:** malformed Enron address headers triggered
+  `TypeError: 'ValueTerminal' object does not support item assignment` during
+  Python 3.12's lazy structured-header parsing. `_safe_header()` attempts parsing
+  and falls back to the original header value through `raw_items()`; subject
+  decoding also has a raw fallback. Regression tests cover malformed headers.
 
-The Enron corpus is the canonical public benchmark for email analysis: ~517,000
-real corporate emails from senior executives, released in 2003 after the FERC
-investigation. It's attractive for three reasons. First, it's **real and messy** —
-malformed headers, encoded subjects, forwarded threads, and legal disclaimers —
-which is exactly what production email data looks like, unlike toy datasets.
-Second, it's **large enough** to exercise the engineering problems that matter
-(517k rows can't fit comfortably in a 5.6GB laptop's memory if you're careless).
-Third, it's **ethically clean to use publicly** — the corpus was already released
-by regulators, so it's safe to demo and commit to a public repo. The trade-off:
-Enron has **no priority labels**, which drove the labeling decision below.
+Prefect flows expose standalone `python -m src.flows.<name>` CLIs and task logs
+(ADR-001). Pure processing functions are separated from orchestration and
+MLflow/Evidently access. Full-data runs were executed in the user's WSL terminal.
 
-## 3. The labeling problem and how we solved it
+## 2. Heuristic labels and the raw-to-clean data boundary
 
-Email priority is a subjective label that Enron never recorded, so there's no
-ground truth to train against. Options: (a) hand-label thousands of emails —
-expensive and inconsistent; (b) use a synthetic label — which is what we did,
-and we were explicit about it.
+Enron supplies no priority ground truth. The rule in `src/labels/labeling.py`
+(ADR-005) is:
 
-Our label (ADR-005, single source of truth in `src/labels/labeling.py`):
+> priority = 1 if the sender is in the leadership list OR the subject contains
+> an urgency keyword.
 
-> `priority = 1` if the sender is in a known leadership list **or** the subject
-> contains an urgency keyword (urgent, asap, immediately, deadline, action
-> required, time sensitive, eod, eow, by end of).
+Recovering that rule is measurable; demonstrating human urgency detection is
+not possible from these labels alone. In particular, non-leadership positives
+are keyword labels by construction.
 
-This is a **documented, heuristic label** — it encodes the domain belief that
-urgency is signaled by *who* wrote and *what* the subject says. It is not a
-subjective human label, and we say so in the README and reports. The model learns
-to predict our definition of priority, which is a defensible engineering choice
-for a portfolio when no ground truth exists. On the full dataset this produced
-**3,526 priority emails out of 517,401 (0.68%)**.
+| Data scope | Emails / rows | Labeled positives | Positive rate |
+|---|---:|---:|---:|
+| Raw ingested corpus | 517,401 | 3,526 | 0.68% |
+| One row per exact raw `(from, subject, date)` key | 251,741 | 1,494 | 0.59% |
 
-## 4. Why accuracy is the wrong metric — the actual numbers
+Deduplication keeps the first row per key before feature engineering. No priority
+labels are recomputed. This is header-key deduplication, not a claim that email
+bodies are byte-identical. `sender_frequency` consequently counts retained
+emails. The current feature parquet is **251,741 × 13**: five metadata/label
+columns plus eight tabular features; it contains no body.
 
-The dataset has **513,875 negatives vs 3,526 positives (0.68% positive)**. A model
-that predicts "not urgent" for every single email scores:
+The ADR-012 split groups raw sender with normalized subject: lowercase, strip
+stacked leading RE:/FW:/FWD:/REW: markers, and collapse whitespace. Twenty
+StratifiedGroupKFold folds with seed 42 are assigned 14/3/3:
 
-> 513,875 / 517,401 = **99.33% accuracy**
+| Split | Rows | Positives | Leadership positives |
+|---|---:|---:|---:|
+| Train | 176,219 | 1,045 | 175 |
+| Validation | 37,761 | 224 | 60 |
+| Test | 37,761 | 225 | 60 |
 
-...while catching **zero** urgent emails. That's the trap: on a 99:1 imbalanced
-dataset, accuracy rewards a do-nothing model. The metric that matters is
-performance on the rare class. We report **precision, recall, and F1 on class 1**
-(plus class-level breakdowns for both classes — class 1 is the one we care
-about). F1 is the harmonic mean of precision and recall, so it only looks good
-if the model finds urgent emails *and* doesn't cry wolf. Accuracy is reported but
-never used as the primary decision metric — it's in our hard rules and enforced
-in CI (AGENTS/CLAUDE rules).
+Read-only checks found zero group and UID overlap between splits. Training
+derives and logs `scale_pos_weight = train_negatives / train_positives`:
+**175,174 / 1,045 ≈ 167.630622**, about **167.6**. The ratio is not a fixed
+corpus-wide constant.
 
-## 5. Why LightGBM and not neural networks
+## 3. Three leaks, each exposed by a diagnostic
 
-Three reasons (ADR-003):
+### Leak 1 — keyword inputs reproduce the target
 
-1. **Sparse features, fast training.** Our NLP signal is a TF-IDF matrix of the
-   subject line — naturally sparse. Gradient-boosted trees handle sparse matrices
-   natively and efficiently; a neural net needs dense embeddings (with
-   pre-training) to compete. On a 5.6GB laptop, LightGBM trains on 517k rows in
-   minutes.
-2. **Iteration speed.** We get a trainable baseline in one session, which matters
-   when development time is limited. The faster we iterate, the more production
-   problems we can demonstrate.
-3. **Interpretability.** Tree models expose feature importances we can log and
-   monitor for drift — essential for the monitoring layer (Evidently compares
-   live inputs vs training distribution). A black-box transformer would make
-   drift debugging harder.
+Comparing training variants exposed direct label leakage: `urgency_keyword_count`
+and subject TF-IDF encode inputs used to create priority. The keyword-input
+variant reproduced all held-out labels in the clean-split run: diagnostic
+**F1=1.000, model interval not estimated**. For the same test split, the
+leadership-only baseline has **F1=0.421 [0.205, 0.649]**. The perfect score is
+retained only as label-leakage evidence, not an urgency-performance claim
+(ADR-009). Fitting TF-IDF on train only does not remove this direct target leak.
 
-The ADR is explicit: **DistilBERT is a stretch goal only if the LightGBM baseline
-fails to reach F1 ≥ 0.70**. We don't reach for the impressive-sounding model
-first; we establish a solid, explainable baseline.
+### Leak 2 — leadership is the other half of the rule
 
-## 6. Two production problems we actually hit and solved
+The seven-feature `behavioral-only` variant removed keyword count and TF-IDF,
+but retained `sender_is_leadership`. A crosstab showed all **732 raw leadership
+rows** had priority=1. Inspection of the original artifact found leadership at
+the root split, accounting for **27.4% of its gain**. Those are historical
+diagnostics, not feature-importance claims about the current forest.
 
-These are the stories interviewers remember.
+After deduplication there are **295 leadership positives**. At the clean
+validation-selected threshold, the reference flags exactly the **60 leadership
+emails** in both validation and test. Reference and leadership-only rule both
+have test **F1=0.421 [0.205, 0.649]**; their paired difference is
+**0.000 [0.000, 0.000]**. No non-leadership emails are flagged. Calling this
+variant "clean" had confused removing one label channel with removing both
+(ADR-010, superseded by ADR-013).
 
-**Problem 1 — Out-of-memory (OOM) on a 5.6GB machine.**
-The first full ingestion run (517k emails) was **killed by the Linux OOM killer**.
-Root cause: the original code held **three full in-memory copies** — the raw
-extracted list, the validated list, and the DataFrame. On a 5.6GB host that's a
-hard ceiling, not a tuning issue. Fix: **batched streaming** — a generator
-(`iter_records`) yields emails one at a time, and a pyarrow `ParquetWriter`
-buffers 50,000 emails per write. Memory is now bounded regardless of dataset
-size; the full run completed (517,401 emails, 0 dropped, ~22 min) with memory
-flat. The lesson: measure the data's memory footprint before designing the
-pipeline, and design for bounded memory from the start.
+### Leak 3 — copies crossed the random split
 
-**Problem 2 — A crash inside CPython 3.12's email parser.**
-Halfway through a full run (11 minutes in) the process crashed with
-`TypeError: 'ValueTerminal' object does not support item assignment`. Root cause:
-`email.policy.default` *lazily* applies Python's strict structured-address
-parser when a header is accessed. A real Enron header —
-`To: Sales Team@enron.com, .casaudoumecq@enron.com, ...` (a display name followed
-by `@` with no angle brackets) — is malformed, so the strict parse raised
-`HeaderParseError`, and CPython 3.12 has a recovery bug that then crashes the
-interpreter. Fix: `_safe_header()`, which tries the strict parse and falls back
-to the **raw header bytes** via `msg.raw_items()` — plus `_decode_subject()` for
-RFC 2047 encoded subjects, also with a raw fallback. The full run then completed
-cleanly. The lesson: real-world data breaks standard-library assumptions, and
-"tolerate malformed input" is a design requirement, not an afterthought. (This
-failure was later caught as a CI regression on CPython 3.12.13, where the same
-malformed header stopped crashing but re-rendered differently — a version
-behavior change we caught with a semantic-preservation test.)
+An exact-key overlap diagnostic found that **76.8% of raw rows** shared
+`(from, subject, date)` with another row. In the seed-42 random split,
+**66.9% of validation rows** had an identical key in train. All earlier metrics
+were contaminated as estimates of held-out generalization.
 
-## 7. The TF-IDF leakage decision and why it matters
+Exact deduplication alone was insufficient: random stratification still put
+**28.3% of validation rows** alongside an exact sender/subject pair in train;
+**59.7%** shared a normalized subject. This motivated the grouped split above.
+The implemented provenance gate checks strategy/version, seed, dedupe policy,
+per-split counts, sorted-UID membership fingerprint, and training class weight
+before scoring. Missing provenance or a superseded source run causes an abort.
 
-TF-IDF learns a vocabulary and term weights from a corpus. If we fit the
-vectorizer on **all** data including the test split, the model has implicitly
-seen test-token frequencies during training — that's **data leakage**, and it
-inflates evaluation scores that won't hold in production.
+## 4. The honest result: ranking value, no classification gain over the rule
 
-Decision (ADR-008): the features layer only exposes `fit_subject_vectorizer()`
-and `transform_subjects()`; **the vectorizer is fit on the training split only,
-never the full dataset**, and is applied to train/validation/test. This is the
-same discipline as fitting a StandardScaler on train only. The fitted vectorizer
-is saved as an MLflow artifact so serving applies exactly the same transform.
+The reference artifact contains **1,886 trees**. Validation chooses the operating
+threshold **0.9943359717873594**; test is never used to tune it.
 
-Second part of the decision, born from the OOM problem: the TF-IDF output is
-stored as **scipy sparse matrices**, never dense float32 columns. A 517,401 × 100
-dense array is ~200MB — on a 5.6GB host that's a real OOM risk. Sparse storage
-keeps it at a few MB. Two-for-one: correct methodology *and* memory discipline.
+| Test metric | Behavioral reference, 95% CI | Leadership-only baseline | Paired reference minus rule, 95% CI |
+|---|---|---|---|
+| F1 | 0.421 [0.205, 0.649] | 0.421 [0.205, 0.649] | 0.000 [0.000, 0.000] |
+| All-row PR-AUC | 0.327 [0.188, 0.514] | 0.271; separate interval not logged | +0.056 [+0.013, +0.104] |
+| Non-leadership PR-AUC | 0.032 [0.006, 0.087] | Prevalence benchmark: 0.0044 | Paired slice difference not estimated |
 
-## 8. Why Prefect over Airflow
+The baseline's F1 interval is identical because its predictions are identical
+to the reference's in every resample. Model precision is **1.000 [1.000, 1.000]**
+and recall **0.267 [0.114, 0.480]**. Perfect observed precision is structural:
+leadership implies priority in the labels. It does not establish perfect urgency
+recognition. The model gives **no classification gain over the rule** at this
+threshold; heuristic labels cap what any model can demonstrate about urgency.
 
-Airflow is the industry standard, but its operational cost is real: a metadata
-database, a scheduler, and a webserver just to get started. For a solo, fully
-local project on WSL that's disproportionate overhead. **Prefect 3.x runs with
-zero infrastructure locally** — flows execute immediately, and you get the same
-core concepts (directed acyclic graphs, retries, task/flow boundaries, logging,
-the ability to later run against a real server). The orchestrator concepts
-transfer directly if a team is on Airflow; the difference is operational
-footprint, not capability (ADR-001). We also design every flow to be
-independently runnable (`python -m src.flows.<name>`) with a CLI — so nothing
-hides behind the orchestrator, and each stage is testable in isolation.
+Intervals use **1,000 whole-group bootstrap resamples**, seed 42, over
+**26,676 test groups**, with zero skipped draws. Model and baseline share draws;
+the model and threshold remain fixed. Runtime was **1.65 seconds**. These
+intervals cover test-cluster sampling, not training or threshold-selection
+variability, and do not guarantee future-email performance.
 
-## 9. Current project state
+A diagnostic retrained for the source run's **2,000 rounds**, without early
+stopping or an eval set. Truncating it to 1,886 trees reproduced the artifact's
+validation PR-AUC with **zero gap**, without a deterministic retry. Clean
+non-leadership validation PR-AUC ranged **0.012-0.021**, flattening rather than
+showing the old sustained climb. No paired tree-count comparison was performed;
+the model was not replaced and PR-AUC-based training-v2 is not pursued.
 
-| Stage | Status | Details |
-|---|---|---|
-| EDA | ✅ Done | 517,401 emails, date range 2000-01-21 → 2002-03-08, field null analysis |
-| Ingestion | ✅ Done | Streaming/batched; 423MB tar.gz → 511MB parquet (11 row groups), 0 dropped, ~22 min |
-| Labeling | ✅ Done | Heuristic (ADR-005); 3,526 positives (0.68%) |
-| Feature engineering | ✅ Done | 8 tabular features + sparse TF-IDF (fit at train time); feature parquet 517,401 × 13, 0 nulls |
-| CI/CD | ✅ Done | GitHub Actions: lint (ruff/black/isort) + tests + coverage; 71 tests passing, 92% coverage |
-| Git workflow | ✅ Done | Branch-per-change, PRs, branch protection on `main`, SSH auth |
-| Training | 🔜 In progress | LightGBM + `scale_pos_weight=145.7`, MLflow local `./mlruns` |
-| Evaluation | ⬜ Not started | Per-class F1/P/R, ROC-AUC, confusion matrix, Evidently baseline report |
-| ONNX export | ⬜ Not started | LightGBM → ONNX, validated via onnxruntime |
-| Serving | ⬜ Not started | FastAPI + Docker (`/predict`, `/predict/batch`, `/health`, `/metrics`) |
-| Monitoring | ⬜ Not started | Evidently drift, Prometheus + Grafana, SQLite prediction log |
-| Data versioning | ⬜ Not started | DVC tracking of artifacts |
+Evidently compared a **50,000-row train reference** with the **37,761-row test
+split** and found **0/7 drifted columns**. This is an offline baseline report,
+not a live monitoring service, and absence of marginal drift does not resolve
+label leakage.
 
-## 10. The 2-minute pitch
+ADR-013 retains behavioral-only as the **reference model for planned serving
+and monitoring**, not a production urgency model. Variant 3, `no-label-inputs`,
+is deferred and not built (ADR-011).
 
-> "I built a production email-priority classifier end to end on the Enron corpus —
-> about 517,000 real corporate emails from executives, which is the standard
-> public benchmark for email. The hard part is there's no ground truth, so I
-> defined a defensible heuristic label: priority if the sender is leadership or
-> the subject has an urgency keyword. That gives 3,526 positives out of 517,401 —
-> 0.68% — which is why I never use accuracy; a model that predicts 'not urgent'
-> for everything scores 99.33% accuracy while catching nothing, so I evaluate on
-> per-class precision, recall, and F1.
+## 5. Corrections are part of the engineering evidence
+
+The old pitch treated removing keywords as making the model honest, used a
+fixed class weight, and omitted duplicate overlap. Those claims were corrected.
+Seven old MLflow runs were tagged superseded before the clean training runs;
+their artifacts were preserved.
+
+The following are **audit-only legacy records**, not current performance to
+quote. No valid clean-split baseline-and-interval comparison accompanies these
+old F1 values; historical intervals were not estimated:
+
+| Superseded record | Why it must not be quoted as current performance |
+|---|---|
+| F1 0.12 / ROC-AUC 0.85 | Duplicate-leaky random split; leadership still encoded the target; baseline/CI comparison unavailable for this legacy score. |
+| Tuned threshold 0.9121 / test F1 0.3765 | Same contaminated data/split; no valid baseline-and-interval comparison for the legacy F1. |
+| Non-leadership validation PR-AUC 0.643 at 1,000 trees | Duplicate-leaky curve, superseded by the grouped-split experiment. |
+
+The pre-registered expectation of a sharply smaller, flatter non-leadership
+curve was confirmed descriptively. The historical contrast is uncontrolled:
+validation data, training data/sender frequencies, and class weight changed.
+It is not a causal proof that duplicates alone produced the old climb.
+
+## 6. Concepts I can explain with this experiment
+
+- **Accuracy versus rare-class retrieval:** the retained corpus has 250,247
+  negative labels and 1,494 positives. Flagging nothing gives about **99.41%
+  accuracy** while recovering no positives. Precision measures correctness of
+  flags; recall measures positive coverage; F1 balances them at an operating
+  threshold. Here reference and rule share **F1=0.421 [0.205, 0.649]**, so
+  quoting the score alone hides the absence of classification gain.
+- **Train-only TF-IDF:** vocabulary and term weights are fit only on train,
+  then transformed on validation/test and saved with the keyword variant.
+  This avoids held-out vocabulary/frequency fitting; it does not prevent
+  subjects from directly encoding a keyword-derived target. CSR matrices
+  avoid dense TF-IDF materialization (ADR-008).
+- **Class weighting:** `scale_pos_weight` changes the positive-class loss
+  contribution. It comes from training labels only, about 167.6 here, and is
+  logged per run. Weighted scores are uncalibrated; a threshold near 0.9943
+  is not a 99.43% probability of real urgency.
+- **PR-AUC versus ROC-AUC:** PR-AUC is reported as average precision and is
+  the primary ranking metric. Its chance benchmark is prevalence; the
+  non-leadership test benchmark is about 0.0044. ROC-AUC measures ordering
+  against negatives but does not show how many flagged emails are correct
+  at such low prevalence. Both ranking and a fixed-threshold rule comparison
+  are needed.
+- **Label leakage versus split leakage:** keyword/leadership inputs reveal
+  how the target was constructed. Copies or related sender/subject groups
+  across splits expose held-out content to training. Train-only preprocessing,
+  input ablations, and group-overlap audits address different failure modes.
+- **Remaining limitations:** sender frequency still uses all retained emails,
+  including held-out ones; sender frequency and subject length may proxy the
+  label inputs; same-subject overlap across different senders remains. There
+  are only **164 validation / 165 test non-leadership positives**. A grouped
+  split is not a claim of leakage-free human-urgency evaluation.
+
+## 7. Implemented stack and traceability
+
+Prefect orchestration, Parquet ingestion/features, LightGBM training, local
+SQLite-backed MLflow, provenance-gated evaluation, diagnostic retraining,
+Evidently's offline baseline, and group-aware uncertainty are implemented.
+The latest full suite passed **263 tests** in WSL. MLflow and Evidently are
+mocked in task tests except for the explicitly small real-Evidently regression.
+
+The measured behavioral source run is `7189707b198f47748f89965712eee4bc`;
+the baseline/CI evaluation is `559ccf6356494eecabb332c47eff2105`. The split
+fingerprint is logged in both. Evaluation writes a new run, never overwrites
+training metrics, logs full threshold/diagnostic tables as artifacts, and
+computes the grouped split once per evaluation flow. Its CSV-only diagnostic
+points do not become extra MLflow metrics.
+
+LightGBM was chosen for tabular/sparse features and inspectable importances
+(ADR-003); body NLP is excluded (ADR-004). Local MLflow records actual
+experiments (ADR-002). Prediction logging (ADR-006) and ONNX export (ADR-007)
+remain designs for unstarted stages. A final combined HTML evaluation summary
+has not been built; the existing Evidently HTML is a drift baseline only.
+
+## 8. Two-minute pitch
+
+> I built a local email-priority experiment pipeline on Enron, from streaming
+> ingestion through provenance-gated evaluation. The raw corpus has 517,401
+> emails and 3,526 heuristic positives. Deduplication leaves 251,741 rows and
+> 1,494 positives, and I use a sender/normalized-subject grouped split.
 >
-> The pipeline is real production engineering, not a notebook. I stream the
-> archive in batches because my first naive version got OOM-killed — the machine
-> has 5.6GB of RAM — and I fixed a crash inside CPython's own email parser caused
-> by malformed Enron headers. Features are eight tabular signals plus TF-IDF on
-> the subject line, where the vectorizer is fit on the training split only to
-> avoid leakage. The model is LightGBM with class weights — 145.7 to one — chosen
-> because it handles sparse features and is interpretable; a transformer is the
-> stretch goal only if the baseline misses F1 0.70. Everything is orchestrated
-> with Prefect, tracked in MLflow, and gated by CI — 71 tests passing. The
-> serving and drift-monitoring layers are the next stage."
+> The ingestion initially ran out of memory and crashed on a malformed header
+> inside CPython. I fixed those with batched Parquet writing and parsing
+> fallbacks. Then the modeling diagnostics exposed three leaks: keyword inputs
+> reproduced the target, leadership reproduced its other half, and copies
+> crossed the random split. I preserved and superseded the contaminated runs
+> instead of presenting them as successful models.
+>
+> On the corrected split, the reference and leadership-only rule both have
+> test F1 0.421 with a 95% cluster interval of 0.205 to 0.649; their paired
+> difference is exactly zero. The model does improve ranking PR-AUC over the
+> rule by 0.056, with a paired interval of 0.013 to 0.104, but flags no
+> non-leadership emails at the selected threshold. Those labels cannot prove
+> real urgency detection.
+>
+> The engineering result is reproducible splitting, artifact-length replay,
+> baseline comparisons and cluster uncertainty, with 263 passing tests. MLflow
+> uses local SQLite. Serving, live monitoring, ML deployment automation and
+> ONNX export are not started. The saved model remains a documented reference,
+> not a production urgency claim.
 
-## 11. Six questions to answer cold
+## 9. Eight questions to answer cold
 
-**Q1. Your accuracy is 99.33% — why isn't that good?**
-Because the dataset is 513,875 negatives vs 3,526 positives (0.68%). A model that
-predicts "not urgent" for every email gets 99.33% accuracy and finds zero urgent
-emails — it's useless. I report precision, recall, and F1 on the positive class,
-with class-level breakdowns for both. Accuracy appears in reports but is never
-the decision metric.
+### 1. What did you actually build?
+Archive-to-Parquet ingestion, heuristic labeling, deduplicated feature
+engineering, grouped LightGBM training with MLflow, and evaluation with split
+provenance, diagnostic replay, a rule baseline, cluster CIs and an offline
+Evidently report. Serving and live monitoring are not implemented.
 
-**Q2. How do you train without ground-truth labels?**
-Enron has no priority labels, so I defined a transparent heuristic: priority = 1
-if the sender is on a known leadership list or the subject contains one of nine
-urgency keywords. It's documented as a synthetic label in the architecture
-decisions and single-sourced in `src/labels/labeling.py`. The model learns that
-definition; it's an honest, defensible choice when no human labels exist.
+### 2. What surprised you?
+Removing keyword features did not make the remaining model label-clean.
+The leadership crosstab and original root split exposed the other target
+channel. Duplicate-overlap checks then invalidated the earlier random-split
+interpretation. A high score required explaining, not celebrating.
 
-**Q3. Walk me through the OOM you hit.**
-My first ingestion design held three full copies of 517k emails in memory — raw,
-validated, and a DataFrame — and the Linux OOM killer killed the run on my 5.6GB
-machine. I switched to a generator that yields emails one at a time and a pyarrow
-ParquetWriter that buffers 50,000 rows per write, so memory is bounded no matter
-the dataset size. The full run then finished in ~22 minutes with flat memory and
-zero dropped records.
+### 3. Why doesn't your model beat a trivial rule?
+At the val-chosen threshold it makes exactly the rule's test predictions:
+both have **F1=0.421 [0.205, 0.649]**, paired difference **0 [0, 0]**.
+Leadership is part of the label definition. Ranking improves by paired
+PR-AUC **+0.056 [+0.013, +0.104]**, but the operating point adds no detections
+outside leadership. That is a label/task limitation, not a production win.
 
-**Q4. You mentioned crashing inside CPython — what happened?**
-`email.policy.default` lazily applies Python's strict structured-address parser
-when you read a header. A real Enron `To:` header like
-`Sales Team@enron.com, .casaudoumecq@enron.com` is malformed — display name
-followed by @ with no angle brackets — so the strict parse raises, and CPython
-3.12 has a recovery bug that crashed the interpreter mid-run. I added
-`_safe_header()`, which tries the strict path and falls back to raw header bytes
-via `msg.raw_items()`, plus a decoder for RFC 2047 encoded subjects. The lesson:
-real data breaks stdlib assumptions; tolerate malformed input by design.
+### 4. How did you catch duplicate leakage?
+I counted exact `(from, subject, date)` groups and joined validation keys
+against train: 76.8% of raw rows had another copy, and 66.9% of validation
+rows had a matching key in train. After deduplication I checked residual
+sender/subject overlap, adopted grouped folds, and logged a membership hash
+that evaluation must reproduce before scoring.
 
-**Q5. What's the TF-IDF leakage and what did you do?**
-If you fit a TF-IDF vocabulary on the whole dataset, the test split's token
-frequencies leak into training and inflate your scores. So the vectorizer is fit
-only on the training split and saved as an artifact so serving applies the same
-transform. I also store the output as scipy sparse — a dense 517k×100 matrix is
-~200MB and would risk OOM on this machine.
+### 5. Why fit TF-IDF on train only, and why wasn't that enough?
+Fitting on held-out text leaks vocabulary/frequency information. Train-only
+fitting prevents that path. It cannot stop subject features from reproducing
+labels explicitly derived from subject keywords. Preprocessing leakage and
+target leakage are separate problems.
 
-**Q6. How do you handle the 0.68% class imbalance in the model?**
-Two ways. Evaluation: precision/recall/F1 on class 1 instead of accuracy.
-Training: LightGBM gets `scale_pos_weight=145.7` — the exact ratio of negatives
-to positives (513,875 / 3,526) — so the model is penalized appropriately for
-missing the rare class. Without it, LightGBM would learn to predict all-zeros.
-The value is logged as a hyperparameter in MLflow so every run is reproducible.
+### 6. Why weight classes and prefer PR-AUC to accuracy or ROC-AUC?
+Only 0.59% of retained labels are positive. The class weight is the training
+negative/positive ratio, about 167.6, not a fixed raw-corpus number. PR-AUC
+shows precision/recall ranking against a prevalence benchmark; accuracy is
+dominated by negatives and ROC-AUC alone does not establish useful precision.
+Class weighting also means scores should not be read as calibrated probabilities.
+
+### 7. What do your confidence intervals establish?
+They describe test-cluster resampling with this model and its val-selected
+threshold fixed. The paired PR-AUC interval supports ranking value over the
+rule; identical predictions explain the zero paired F1 difference interval.
+They do not include training/threshold-selection variability or compare
+tree counts. Precision's [1,1] comes from the heuristic label rule.
+
+### 8. What would you do with real labels?
+I would first define urgency with users and obtain independent annotations,
+including non-leadership emails. I would compare leadership and keyword rules
+against those labels, assess group/time generalization, then evaluate calibrated
+scores and operating costs on held-out data. Those are proposed steps, not
+completed work or a promise of improved performance.
+
+## 10. Roadmap — not implemented
+
+| Stage | Status | Planned scope |
+|---|---|---|
+| Serving | **NOT STARTED** | FastAPI/Docker for the documented reference model |
+| Live monitoring | **NOT STARTED** | Prediction logging, ongoing drift, Prometheus/Grafana |
+| CI/CD for ML | **NOT STARTED** | Automated retraining, registry promotion and deployment |
+| ONNX export | **NOT STARTED** | Export and onnxruntime validation |
+
+Variant 3 (`no-label-inputs`, ADR-011) is **deferred, not built**. Training-v2
+with PR-AUC early stopping is not pursued (ADR-013). No saved-model replacement
+or new tree-count selection follows from the current diagnostic.
