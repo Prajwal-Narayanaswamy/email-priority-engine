@@ -15,6 +15,7 @@ from __future__ import annotations
 import tempfile
 from collections.abc import Mapping
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 
 import evidently
@@ -40,10 +41,12 @@ from src.evaluation.evaluate import (
     sweep_thresholds,
     verify_split,
 )
+from src.evaluation.uncertainty import cluster_bootstrap_ci, leadership_baseline_metrics
 from src.tasks.train_tasks import DEDUPE_POLICY, EXPERIMENT_NAME, TRACKING_URI
 from src.training.splits import (
     SPLIT_STRATEGY,
     SPLIT_VERSION,
+    group_keys,
     grouped_split,
     split_fingerprint,
 )
@@ -77,6 +80,8 @@ DIAGNOSTIC_PROBES: tuple[int, ...] = (1, 10, 50, 100, 300, 600, 1000, 1500)
 
 #: Sanity gate: retrain truncated to artifact trees must reproduce its val PR-AUC.
 SANITY_TOLERANCE: float = 1e-6
+CI_BOOTSTRAP_SAMPLES: int = 1000
+CI_BOOTSTRAP_SEED: int = 42
 
 
 class DiagnosticMismatchError(RuntimeError):
@@ -299,6 +304,32 @@ def evaluate_variant_task(
         float(nolead_pr_auc),
     )
 
+    leadership = test_df["sender_is_leadership"].to_numpy()
+    baseline = leadership_baseline_metrics(y_test, leadership)
+    test_groups = (
+        group_keys(test_df)
+        .groupby(["from", "normalized_subject"], dropna=False, sort=False)
+        .ngroup()
+        .to_numpy()
+    )
+    started = perf_counter()
+    intervals = cluster_bootstrap_ci(
+        y_test,
+        test_proba,
+        leadership,
+        test_groups,
+        threshold=threshold,
+        n_resamples=CI_BOOTSTRAP_SAMPLES,
+        seed=CI_BOOTSTRAP_SEED,
+    )
+    logger.info(
+        "Test cluster bootstrap: B=%d, groups=%d, threshold fixed %.6f, %.2fs",
+        CI_BOOTSTRAP_SAMPLES,
+        len(np.unique(test_groups)),
+        threshold,
+        perf_counter() - started,
+    )
+
     total_trees = int(model.booster_.num_trees())
     if total_trees < 1:
         raise ValueError("loaded model contains no trees")
@@ -336,6 +367,12 @@ def evaluate_variant_task(
         "loaded_num_trees": total_trees,
         "tuned_threshold": threshold,
         "evidently_reference_cap": reference_cap,
+        "ci_bootstrap_samples": CI_BOOTSTRAP_SAMPLES,
+        "ci_bootstrap_seed": CI_BOOTSTRAP_SEED,
+        "ci_method": "95% percentile cluster bootstrap",
+        "ci_group_key": "(from, normalized subject)",
+        "ci_group_count": len(np.unique(test_groups)),
+        "ci_scope": "test clusters only; model and val-selected threshold fixed",
     }
     metrics: dict[str, float] = {
         "val_precision": float(val_scores["precision"]),
@@ -356,7 +393,15 @@ def evaluate_variant_task(
         "test_nolead_pr_auc": float(nolead_pr_auc),
         "test_leadership_rows": float(test_leadership_rows),
         "test_leadership_flagged": float(test_leadership_flagged),
+        **{f"baseline_leadership_{name}": value for name, value in baseline.items()},
+        "model_minus_baseline_f1": float(test_scores["f1"]) - baseline["f1"],
+        "model_minus_baseline_pr_auc": float(test_pr_auc) - baseline["pr_auc"],
     }
+    for name, interval in intervals.items():
+        metrics[f"ci95_{name}_skipped"] = float(interval["skipped"])
+        for bound in ("lo", "hi"):
+            if interval[bound] is not None:
+                metrics[f"ci95_{name}_{bound}"] = float(interval[bound])
     for count, pr_value, roc_value in zip(
         iteration_table["iteration"],
         iteration_table["pr_auc"],
@@ -426,6 +471,8 @@ def evaluate_variant_task(
         },
         "test_leadership_rows": test_leadership_rows,
         "test_leadership_flagged": test_leadership_flagged,
+        "baseline_leadership": baseline,
+        "confidence_intervals": intervals,
         "source_best_iteration": best_iteration,
         "loaded_num_trees": total_trees,
         "iterations": [

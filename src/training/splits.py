@@ -48,6 +48,20 @@ def dedupe_exact_keys(df: pd.DataFrame) -> pd.DataFrame:
     return df.drop_duplicates(subset=list(_EXACT_KEYS), keep="first").copy()
 
 
+def group_keys(df: pd.DataFrame) -> pd.DataFrame:
+    """Return raw sender/normalized-subject keys in positional input order.
+
+    Same construction as the ADR-012 split, including missing senders and
+    empty normalized subjects. This helper neither assigns folds nor dedupes.
+    """
+    return pd.DataFrame(
+        {
+            "from": df["from"].to_numpy(),
+            "normalized_subject": df["subject"].map(normalize_subject).to_numpy(),
+        }
+    )
+
+
 def grouped_split(
     df: pd.DataFrame, seed: int = 42
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -67,12 +81,7 @@ def grouped_split(
     labels = df["priority"].to_numpy()
     if len(labels) == 0 or not np.all(np.isin(labels, (0, 1))):
         raise ValueError("grouped_split requires nonempty binary 0/1 labels")
-    group_frame = pd.DataFrame(
-        {
-            "from": df["from"].to_numpy(),
-            "normalized_subject": df["subject"].map(normalize_subject).to_numpy(),
-        }
-    )
+    group_frame = group_keys(df)
     groups = (
         group_frame.groupby(["from", "normalized_subject"], dropna=False, sort=False)
         .ngroup()

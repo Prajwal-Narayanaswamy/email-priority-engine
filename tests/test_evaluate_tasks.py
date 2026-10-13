@@ -375,6 +375,58 @@ def test_evaluate_variant_task_logs_eval_run_tags_and_params(
     assert summary["run_id"] == "eval-run-id"
 
 
+def test_evaluation_logs_hand_computed_baseline_and_fixed_threshold_cluster_ci(
+    eval_splits: dict[str, pd.DataFrame],
+    fake_client_cls: Any,
+    mock_mlflow: MagicMock,
+    quiet_logger: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    val = eval_splits["val"].iloc[:4].copy()
+    test = eval_splits["test"].iloc[:4].copy()
+    val[TARGET] = [1, 0, 0, 0]
+    test[TARGET] = [1, 0, 1, 0]
+    val["sender_is_leadership"] = test["sender_is_leadership"] = [1, 0, 0, 0]
+    splits = {**eval_splits, "val": val, "test": test}
+    fake_client_cls.params = split_params(splits)
+    val_scores = np.array([0.9, 0.1, 0.2, 0.8])
+    test_scores = np.array([0.9, 0.1, 0.2, 0.3])
+    model = MagicMock()
+    model.best_iteration_ = 1
+    model.booster_.num_trees.return_value = 1
+    model.predict_proba.side_effect = [
+        np.column_stack((1 - scores, scores))
+        for scores in (val_scores, test_scores, val_scores)
+    ]
+    bootstrap = MagicMock(wraps=evaluate_tasks.cluster_bootstrap_ci)
+    monkeypatch.setattr(evaluate_tasks, "cluster_bootstrap_ci", bootstrap)
+    result = evaluate_variant_task.fn(model, splits)
+    metrics = mock_mlflow.log_metrics.call_args.args[0]
+    params = mock_mlflow.log_params.call_args.args[0]
+    assert result["tuned_threshold"] == 0.9
+    assert metrics["baseline_leadership_precision"] == 1.0
+    assert metrics["baseline_leadership_recall"] == 0.5
+    assert metrics["baseline_leadership_f1"] == pytest.approx(2 / 3)
+    assert metrics["baseline_leadership_pr_auc"] == 0.75
+    assert metrics["model_minus_baseline_f1"] == 0.0
+    assert metrics["model_minus_baseline_pr_auc"] == pytest.approx(1 / 12)
+    assert metrics["ci95_model_minus_baseline_f1_lo"] == 0.0
+    assert metrics["ci95_model_minus_baseline_f1_hi"] == 0.0
+    assert params["ci_bootstrap_samples"] == 1000
+    assert params["ci_bootstrap_seed"] == 42
+    for name, interval in result["confidence_intervals"].items():
+        assert interval["skipped"] + interval["valid"] == 1000
+        assert metrics[f"ci95_{name}_skipped"] == interval["skipped"]
+        if interval["lo"] is not None:
+            assert metrics[f"ci95_{name}_lo"] == interval["lo"]
+            assert metrics[f"ci95_{name}_hi"] == interval["hi"]
+    bootstrap.assert_called_once()
+    np.testing.assert_array_equal(bootstrap.call_args.args[0], test[TARGET].to_numpy())
+    np.testing.assert_array_equal(bootstrap.call_args.args[1], test_scores)
+    assert bootstrap.call_args.kwargs["threshold"] == result["tuned_threshold"]
+    assert model.predict_proba.call_count == 3  # val/test plus existing val tree probe
+
+
 def test_evaluate_variant_task_threshold_from_val_unchanged_on_test(
     tiny_model: Any,
     eval_splits: dict[str, pd.DataFrame],

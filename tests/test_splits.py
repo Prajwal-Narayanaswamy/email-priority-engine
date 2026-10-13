@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+from unittest.mock import MagicMock
+
 import pandas as pd
 import pytest
 
+from src.training import splits as splits_module
 from src.training.splits import (
     SPLIT_STRATEGY,
     SPLIT_VERSION,
     dedupe_exact_keys,
+    group_keys,
     grouped_split,
     normalize_subject,
     split_fingerprint,
@@ -156,3 +160,44 @@ def test_grouped_split_rejects_invalid_labels(grouped_emails: pd.DataFrame) -> N
 def test_split_policy_constants() -> None:
     assert SPLIT_STRATEGY == "stratified-group-kfold-20-14-3-3"
     assert SPLIT_VERSION == 1
+
+
+def test_group_keys_preserve_raw_sender_and_normalize_subject() -> None:
+    frame = pd.DataFrame(
+        {
+            "from": ["A <a@example.com>", "a@example.com", None],
+            "subject": ["RE: FW:  TOPIC", " topic ", None],
+        },
+        index=[7, 8, 9],
+    )
+    expected = pd.DataFrame(
+        {
+            "from": ["A <a@example.com>", "a@example.com", None],
+            "normalized_subject": ["topic", "topic", ""],
+        }
+    )
+    pd.testing.assert_frame_equal(group_keys(frame), expected)
+
+
+def test_group_key_helper_is_the_existing_split_policy(
+    grouped_emails: pd.DataFrame,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    expected = pd.DataFrame(
+        {
+            "from": grouped_emails["from"].to_numpy(),
+            "normalized_subject": [f"topic {i // 4}" for i in range(800)],
+        }
+    )
+    pd.testing.assert_frame_equal(group_keys(grouped_emails), expected)
+    spy = MagicMock(wraps=group_keys)
+    monkeypatch.setattr(splits_module, "group_keys", spy)
+    train, val, test = grouped_split(grouped_emails)
+    spy.assert_called_once_with(grouped_emails)
+    split_keys = [
+        set(group_keys(part).itertuples(index=False, name=None))
+        for part in (train, val, test)
+    ]
+    assert split_keys[0].isdisjoint(split_keys[1])
+    assert split_keys[0].isdisjoint(split_keys[2])
+    assert split_keys[1].isdisjoint(split_keys[2])
