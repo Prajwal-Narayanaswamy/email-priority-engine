@@ -144,6 +144,7 @@ stopping metric is wired correctly (invoked every iteration, reported as the sol
 metric `f1_pos`); it did not run to completion and is not the basis for this ADR.
 
 ### ADR-010: behavioral-only is keyword-clean, leadership-leaky (amended 2026-10-06)
+**Status:** Superseded by ADR-013
 See ADR-013: candidate designation superseded; behavioral-only is a serving/monitoring reference only.
 See ADR-012: all earlier performance metrics are superseded by confirmed duplicate leakage.
 `behavioral-only` (7 tabular features, no `urgency_keyword_count`, no subject TF-IDF)
