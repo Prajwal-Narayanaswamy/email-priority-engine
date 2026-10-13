@@ -216,25 +216,33 @@ def test_pr_auc_by_iteration_rejects_length_mismatch() -> None:
         pr_auc_by_iteration(np.array([0, 1]), {1: np.array([0.5]), 5: np.array([0.5])})
 
 
-def test_verify_split_passes_on_match() -> None:
-    reconstructed = {
-        "val_rows": 77610,
-        "val_positives": 529,
-        "test_rows": 77610,
-        "test_positives": 531,
+@pytest.fixture
+def split_metadata() -> dict[str, str | int | float]:
+    return {
+        "split_strategy": "stratified-group-kfold-20-14-3-3",
+        "split_version": 1,
+        "split_seed": 42,
+        "dedupe_policy": "exact (from, subject, date), keep first",
+        "train_rows": 176219,
+        "val_rows": 37761,
+        "test_rows": 37761,
+        "train_positives": 1045,
+        "val_positives": 224,
+        "test_positives": 225,
+        "split_fingerprint": "test-membership",
+        "scale_pos_weight": 175174 / 1045,
     }
+
+
+def test_verify_split_passes_on_match(split_metadata: dict) -> None:
+    reconstructed = split_metadata
     # MLflow stringifies params; the gate must accept that form.
     logged = {key: str(value) for key, value in reconstructed.items()}
     assert verify_split(reconstructed, logged) is None
 
 
-def test_verify_split_lists_all_mismatches() -> None:
-    reconstructed = {
-        "val_rows": 77610,
-        "val_positives": 529,
-        "test_rows": 77610,
-        "test_positives": 531,
-    }
+def test_verify_split_lists_all_mismatches(split_metadata: dict) -> None:
+    reconstructed = split_metadata
     logged = dict(reconstructed)
     logged["val_rows"] = 77609
     logged["test_positives"] = 533
@@ -245,6 +253,26 @@ def test_verify_split_lists_all_mismatches() -> None:
     assert "test_positives" in message
     assert "val_positives" not in message
     assert "test_rows" not in message
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "split_fingerprint",
+        "split_strategy",
+        "split_seed",
+        "split_version",
+        "dedupe_policy",
+        "scale_pos_weight",
+    ],
+)
+def test_verify_split_rejects_provenance_mismatch(
+    split_metadata: dict, key: str
+) -> None:
+    logged = dict(split_metadata)
+    logged[key] = "wrong" if isinstance(logged[key], str) else logged[key] + 1
+    with pytest.raises(SplitMismatchError, match=key):
+        verify_split(split_metadata, logged)
 
 
 def test_verify_split_raises_on_missing_logged_key() -> None:

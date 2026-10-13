@@ -29,6 +29,8 @@ from mlflow.tracking import MlflowClient
 from prefect import get_run_logger, task
 
 from src.evaluation.evaluate import (
+    SPLIT_CHECK_KEYS,
+    SplitMismatchError,
     metrics_at_threshold,
     plot_pr_curve,
     plot_roc_curve,
@@ -38,21 +40,27 @@ from src.evaluation.evaluate import (
     sweep_thresholds,
     verify_split,
 )
-from src.tasks.train_tasks import EXPERIMENT_NAME, TRACKING_URI
+from src.tasks.train_tasks import DEDUPE_POLICY, EXPERIMENT_NAME, TRACKING_URI
+from src.training.splits import (
+    SPLIT_STRATEGY,
+    SPLIT_VERSION,
+    grouped_split,
+    split_fingerprint,
+)
 from src.training.train import (
     BEHAVIORAL_FEATURES,
     SPLIT_SEED,
     TARGET,
     build_matrices,
     build_model,
-    stratified_split,
+    scale_pos_weight_from_labels,
 )
 
 #: MLflow run name for every evaluation run (never the training run's name).
 EVAL_RUN_NAME: str = "evaluation-behavioral-only"
 
 #: Training run under evaluation (behavioral-only, re-run into SQLite).
-DEFAULT_SOURCE_RUN_ID: str = "d6902c4475864604bdbeaeba55e18371"
+DEFAULT_SOURCE_RUN_ID: str = "7189707b198f47748f89965712eee4bc"
 
 #: Name of the LoggedModel holding the fitted classifier in the source run.
 MODEL_ARTIFACT_NAME: str = "model"
@@ -64,18 +72,48 @@ REFERENCE_CAP: int = 50000
 #: the verified [1, total-trees] range. `best` and `total` are added at runtime.
 ITERATION_PROBES: tuple[int, ...] = (1, 10, 50)
 
-#: Default rounds for the diagnostic retrain (early stopping off).
-DIAGNOSTIC_ESTIMATORS: int = 1000
+#: Add the artifact best iteration and final retrained tree at runtime.
+DIAGNOSTIC_PROBES: tuple[int, ...] = (1, 10, 50, 100, 300, 600, 1000, 1500)
 
-#: Only these probes produce per-iteration MLflow scalars; CSVs add every 50th round.
-DIAGNOSTIC_PROBES: tuple[int, ...] = (1, 10, 50, 101, 300, 600, 1000)
-
-#: Sanity gate: the retrained 1-tree val PR-AUC must match the artifact's.
+#: Sanity gate: retrain truncated to artifact trees must reproduce its val PR-AUC.
 SANITY_TOLERANCE: float = 1e-6
 
 
 class DiagnosticMismatchError(RuntimeError):
     """Raised when the diagnostic retrain fails its sanity gate."""
+
+
+def _source_params(client: MlflowClient, source_run_id: str) -> dict[str, str]:
+    """Reject legacy/superseded sources before model scoring or diagnostic fitting."""
+    source = client.get_run(source_run_id)
+    params = dict(source.data.params)
+    missing = [key for key in SPLIT_CHECK_KEYS if key not in params]
+    if "superseded" in source.data.tags or missing:
+        raise SplitMismatchError(
+            f"Source run {source_run_id} is a superseded run from the "
+            "duplicate-leaky split (superseded tag or missing split params: "
+            f"{missing}). Use clean behavioral-only run "
+            f"{DEFAULT_SOURCE_RUN_ID} instead."
+        )
+    return params
+
+
+def _split_metadata(splits: dict[str, pd.DataFrame], seed: int) -> dict[str, Any]:
+    """Describe existing split frames without reconstructing any assignments."""
+    metadata: dict[str, Any] = {
+        "split_strategy": SPLIT_STRATEGY,
+        "split_version": SPLIT_VERSION,
+        "split_seed": seed,
+        "dedupe_policy": DEDUPE_POLICY,
+        "split_fingerprint": split_fingerprint(
+            splits["train"], splits["val"], splits["test"]
+        ),
+        "scale_pos_weight": scale_pos_weight_from_labels(splits["train"][TARGET]),
+    }
+    for name in ("train", "val", "test"):
+        metadata[f"{name}_rows"] = len(splits[name])
+        metadata[f"{name}_positives"] = int((splits[name][TARGET] == 1).sum())
+    return metadata
 
 
 @task
@@ -84,19 +122,19 @@ def load_split_task(
 ) -> dict[str, pd.DataFrame]:
     """Read the feature parquet and rebuild the exact training split.
 
-    Reads only `priority` plus the 7 behavioral columns (full data, NO --limit;
-    no body, no subject) and replays `stratified_split` with the training seed,
-    so the val/test frames are identical to the ones the model was tuned on.
+    Read uid/from/subject/priority plus the 7 behavioral columns, never body.
+    This is the ONLY evaluation task that invokes grouped_split. The flow
+    calls it once and passes its frames to metrics, diagnostic, and Evidently.
 
     Returns:
         Dict with the `train` / `val` / `test` frames.
     """
     logger = get_run_logger()
-    column_names = [TARGET, *BEHAVIORAL_FEATURES]
+    column_names = ["uid", "from", "subject", TARGET, *BEHAVIORAL_FEATURES]
     logger.info("Reading %s (columns: %s)...", input_path, len(column_names))
     df = pd.read_parquet(input_path, columns=column_names)
     logger.info("Read %d rows", len(df))
-    train_df, val_df, test_df = stratified_split(df, seed=seed)
+    train_df, val_df, test_df = grouped_split(df, seed=seed)
     logger.info(
         "Split -> train %d / val %d / test %d rows",
         len(train_df),
@@ -128,6 +166,7 @@ def load_model_task(source_run_id: str = DEFAULT_SOURCE_RUN_ID) -> LGBMClassifie
     logger = get_run_logger()
     mlflow.set_tracking_uri(TRACKING_URI)
     client = MlflowClient(tracking_uri=TRACKING_URI)
+    _source_params(client, source_run_id)
     experiment_id = client.get_experiment_by_name(EXPERIMENT_NAME).experiment_id
     candidates = [
         model
@@ -158,8 +197,8 @@ def load_model_task(source_run_id: str = DEFAULT_SOURCE_RUN_ID) -> LGBMClassifie
     )
     if total_trees == 1:
         logger.warning(
-            "Artifact contains a single tree: the iteration analysis collapses "
-            "to one row and threshold tuning is the only remaining lever."
+            "Artifact contains a single tree: saved-model iteration analysis "
+            "has one row; later trees require the diagnostic retrain."
         )
     return model
 
@@ -170,6 +209,7 @@ def evaluate_variant_task(
     splits: dict[str, pd.DataFrame],
     source_run_id: str = DEFAULT_SOURCE_RUN_ID,
     reference_cap: int = REFERENCE_CAP,
+    seed: int = SPLIT_SEED,
 ) -> dict[str, Any]:
     """Score the model, tune the threshold on val, report on test, log all.
 
@@ -199,7 +239,7 @@ def evaluate_variant_task(
     mlflow.set_experiment(EXPERIMENT_NAME)
     client = MlflowClient(tracking_uri=TRACKING_URI)
 
-    source_params = client.get_run(source_run_id).data.params
+    source_params = _source_params(client, source_run_id)
     if source_params.get("variant") != "behavioral-only":
         raise ValueError(
             "refusing to evaluate: source run "
@@ -209,15 +249,8 @@ def evaluate_variant_task(
 
     val_df = splits["val"]
     test_df = splits["test"]
-    verify_split(
-        {
-            "val_rows": len(val_df),
-            "val_positives": int((val_df[TARGET] == 1).sum()),
-            "test_rows": len(test_df),
-            "test_positives": int((test_df[TARGET] == 1).sum()),
-        },
-        source_params,
-    )
+    metadata = _split_metadata(splits, seed)
+    verify_split(metadata, source_params)
     logger.info("Split gate passed: reconstructed split matches run %s", source_run_id)
 
     val_matrix = build_matrices(
@@ -296,6 +329,7 @@ def evaluate_variant_task(
     )
 
     params: dict[str, Any] = {
+        **metadata,
         "source_run_id": source_run_id,
         "variant": "behavioral-only",
         "source_best_iteration": best_iteration,
@@ -613,55 +647,27 @@ def retrain_diagnostic_task(
     eval_run_id: str,
     artifact_val_pr_auc: float,
     source_run_id: str = DEFAULT_SOURCE_RUN_ID,
-    n_estimators: int = DIAGNOSTIC_ESTIMATORS,
+    *,
+    artifact_num_trees: int,
+    artifact_best_iteration: int,
 ) -> dict[str, Any]:
-    """Retrain behavioral-only without early stopping to test under-training.
+    """Replay source params/round limit without early stopping; score VAL ONLY.
 
-    Answers the carried-forward best_iteration=1 question from the ranking
-    side: the saved artifact kept only its single best tree — `lgb.train()`
-    re-serializes through `model_to_string()` with `num_iteration=None` by
-    default (unless `keep_training_booster=True`), which saves the best
-    iteration only (verified empirically on LightGBM 4.7.0) — so the artifact
-    itself cannot say whether later trees would have added ranking signal.
-    This retrain replays the source run's hyperparameters with early stopping
-    OFF and scores fixed probes plus every 50th round on validation. The
-    leadership feature stays in the model; non-leadership metrics are a slice
-    diagnostic only.
+    Reuse the verified flow's train/val frames, never reconstruct a split.
+    Retrain with logged seed, learning_rate, num_leaves, scale_pos_weight and
+    n_estimators, no eval set or callbacks. The in-memory booster is never saved.
+    Gate at the artifact's PHYSICAL tree count: truncated retrain val PR-AUC
+    must reproduce the artifact's val PR-AUC within 1e-6 before ANY logging.
+    On mismatch retry once with deterministic=True and num_threads=1; report
+    both attempts and abort if the unchanged tolerance is still exceeded.
 
-    Reads seed/learning_rate/num_leaves/scale_pos_weight from the SOURCE run
-    (fails loudly on missing or non-numeric values) and overrides n_estimators
-    only. Fits with no eval set and no callbacks — NOTE `train.train_model`
-    is deliberately not used here, it always applies early stopping — so all
-    rounds run and the booster stays in memory. Nothing is logged as a model,
-    no training code changes, the saved model is untouched. Scores VAL ONLY,
-    never test.
-
-    Sanity gate: the retrained 1-tree val PR-AUC must match the saved
-    artifact's val PR-AUC (passed in from the main evaluation) within
-    SANITY_TOLERANCE, proving the retrain replicated the original
-    trajectory's first tree. Aborts the diagnostic on mismatch. Thread-count
-    nondeterminism (n_jobs=-1) can shift leaf values at ~1e-12; the tolerance
-    absorbs numeric noise but trips on structural divergence, which is the
-    gate's purpose.
-
-    This task runs AFTER the main metrics and plots are logged (the flow
-    orders it there), and resumes the evaluation run — never the training
-    run — to attach a CSV with both validation curves and non-leadership
-    prevalence. Only DIAGNOSTIC_PROBES (clamped to existing trees) produce
-    PR-AUC scalars: at most seven per slice. Every 50th round additionally
-    appears in the CSV, never as an extra MLflow score. Returned slice
-    summaries describe sampled points only, not all rounds.
-    An empty slice or one without positives has undefined PR-AUC: CSV scores
-    are blank, summary scores/iteration are None, a status param explains why,
-    and no undefined score is logged as an MLflow metric. All-row undefined
-    PR-AUC aborts because the first-tree sanity gate cannot be evaluated.
-
-    Returns:
-        Summary dict with builtin types only.
+    Metric probes: 1/10/50/100/300/600/1000/1500, artifact best iteration and
+    final retrained tree, filtered to existing trees. CSV also includes every
+    100th round and the reproduction point. Leadership remains a model input;
+    slice scores exclude only leadership==1 rows. Undefined slice scores are
+    explicitly marked and omitted from numeric MLflow metrics.
     """
     logger = get_run_logger()
-    if n_estimators < 1:
-        raise ValueError(f"n_estimators must be positive, got {n_estimators}")
     if not np.isfinite(artifact_val_pr_auc):
         raise DiagnosticMismatchError(
             f"artifact val PR-AUC is not finite ({artifact_val_pr_auc!r}); "
@@ -669,8 +675,14 @@ def retrain_diagnostic_task(
         )
     mlflow.set_tracking_uri(TRACKING_URI)
     client = MlflowClient(tracking_uri=TRACKING_URI)
-    source_params = client.get_run(source_run_id).data.params
-    required = ("seed", "learning_rate", "num_leaves", "scale_pos_weight")
+    source_params = _source_params(client, source_run_id)
+    required = (
+        "seed",
+        "learning_rate",
+        "num_leaves",
+        "scale_pos_weight",
+        "n_estimators",
+    )
     missing = [key for key in required if key not in source_params]
     if missing:
         raise ValueError(
@@ -681,10 +693,15 @@ def retrain_diagnostic_task(
         learning_rate = float(source_params["learning_rate"])
         num_leaves = int(source_params["num_leaves"])
         scale_pos_weight = float(source_params["scale_pos_weight"])
+        n_estimators = int(source_params["n_estimators"])
     except (TypeError, ValueError) as exc:
         raise ValueError(
             f"source run {source_run_id} has non-numeric training params"
         ) from exc
+    if not 1 <= artifact_num_trees <= n_estimators:
+        raise ValueError("artifact tree count must be within source n_estimators")
+    if not 1 <= artifact_best_iteration <= artifact_num_trees:
+        raise ValueError("artifact best iteration must be within its tree count")
 
     train_matrix = build_matrices(
         train_df, feature_columns=BEHAVIORAL_FEATURES, use_tfidf=False
@@ -692,55 +709,82 @@ def retrain_diagnostic_task(
     val_matrix = build_matrices(
         val_df, feature_columns=BEHAVIORAL_FEATURES, use_tfidf=False
     )
-    model = build_model(
-        scale_pos_weight=scale_pos_weight,
-        n_estimators=n_estimators,
-        learning_rate=learning_rate,
-        num_leaves=num_leaves,
-        random_state=seed,
-    )
-    logger.info(
-        "Diagnostic retrain: %d rounds, no eval set, no early stopping",
-        n_estimators,
-    )
-    model.fit(train_matrix, train_df[TARGET])
-    actual_trees = int(model.booster_.num_trees())
-    if actual_trees != n_estimators:
-        raise ValueError(
-            f"diagnostic retrain produced {actual_trees} trees, "
-            f"expected {n_estimators}"
-        )
-
     y_val = val_df[TARGET].to_numpy()
     nolead_mask = val_df["sender_is_leadership"].to_numpy() == 0
     if len(y_val) == 0 or not np.any(y_val == 1):
         raise DiagnosticMismatchError(
-            "all-row validation PR-AUC is undefined; cannot evaluate first-tree gate"
-        )
-    first_proba = np.asarray(
-        model.predict_proba(val_matrix, num_iteration=1)[:, 1], dtype=float
-    )
-    retrain_one = pr_auc(y_val, first_proba)
-    gap = abs(retrain_one - float(artifact_val_pr_auc))
-    logger.info(
-        "Sanity gate: retrained 1-tree val PR-AUC %.6f vs artifact %.6f "
-        "(gap %.2e, tolerance %.0e)",
-        retrain_one,
-        float(artifact_val_pr_auc),
-        gap,
-        SANITY_TOLERANCE,
-    )
-    if gap > SANITY_TOLERANCE:
-        raise DiagnosticMismatchError(
-            "diagnostic retrain diverged from the saved artifact: retrained "
-            f"1-tree val PR-AUC {retrain_one:.6f} vs artifact "
-            f"{float(artifact_val_pr_auc):.6f} (gap {gap:.2e} > tolerance "
-            f"{SANITY_TOLERANCE:.0e}). The retrain did not replicate the "
-            "original trajectory — aborting the diagnostic."
+            "all-row validation PR-AUC is undefined; cannot evaluate artifact gate"
         )
 
-    metric_iterations = [k for k in DIAGNOSTIC_PROBES if k <= actual_trees]
-    snapshots = sorted(set(metric_iterations) | set(range(50, actual_trees + 1, 50)))
+    def fit_and_check(deterministic: bool) -> tuple[Any, int, np.ndarray, float]:
+        model = build_model(
+            scale_pos_weight=scale_pos_weight,
+            n_estimators=n_estimators,
+            learning_rate=learning_rate,
+            num_leaves=num_leaves,
+            random_state=seed,
+        )
+        if deterministic:
+            model.set_params(deterministic=True, num_threads=1, n_jobs=1)
+        logger.info(
+            "Diagnostic retrain: %d rounds, no eval set/early stopping; "
+            "deterministic=%s",
+            n_estimators,
+            deterministic,
+        )
+        model.fit(train_matrix, train_df[TARGET])
+        total = int(model.booster_.num_trees())
+        if total < artifact_num_trees:
+            raise DiagnosticMismatchError(
+                f"retrain has {total} trees; cannot reproduce artifact's "
+                f"{artifact_num_trees}"
+            )
+        proba = np.asarray(
+            model.predict_proba(val_matrix, num_iteration=artifact_num_trees)[:, 1],
+            dtype=float,
+        )
+        score = pr_auc(y_val, proba)
+        gap = abs(score - float(artifact_val_pr_auc))
+        logger.info(
+            "Artifact-tree gate at %d: retrain %.6f, artifact %.6f, "
+            "gap %.2e (limit %.0e)",
+            artifact_num_trees,
+            score,
+            artifact_val_pr_auc,
+            gap,
+            SANITY_TOLERANCE,
+        )
+        return model, total, proba, gap
+
+    model, actual_trees, reproduced_proba, gap = fit_and_check(False)
+    initial_gap = gap
+    deterministic_retry = gap > SANITY_TOLERANCE
+    if deterministic_retry:
+        logger.warning(
+            "Artifact reproduction failed (gap %.2e); "
+            "retrying deterministic=True, num_threads=1",
+            gap,
+        )
+        model, actual_trees, reproduced_proba, gap = fit_and_check(True)
+    if gap > SANITY_TOLERANCE:
+        raise DiagnosticMismatchError(
+            "diagnostic retrain diverged from the saved artifact at "
+            f"{artifact_num_trees} trees: initial gap {initial_gap:.2e}, "
+            f"deterministic single-thread retry gap {gap:.2e} > "
+            f"tolerance {SANITY_TOLERANCE:.0e}. Aborting before logging; "
+            "do not loosen the tolerance without approval."
+        )
+
+    metric_iterations = sorted(
+        k
+        for k in {*DIAGNOSTIC_PROBES, artifact_best_iteration, actual_trees}
+        if 1 <= k <= actual_trees
+    )
+    snapshots = sorted(
+        set(metric_iterations)
+        | set(range(100, actual_trees + 1, 100))
+        | {artifact_num_trees}
+    )
     nolead_labels = y_val[nolead_mask]
     nolead_prevalence = (
         float((nolead_labels == 1).mean()) if len(nolead_labels) else None
@@ -753,8 +797,8 @@ def retrain_diagnostic_task(
     rows = []
     for count in snapshots:
         scores = (
-            first_proba
-            if count == 1
+            reproduced_proba
+            if count == artifact_num_trees
             else np.asarray(
                 model.predict_proba(val_matrix, num_iteration=count)[:, 1], dtype=float
             )
@@ -788,7 +832,10 @@ def retrain_diagnostic_task(
             "final_pr_auc": float(table[score_column].iloc[-1]) if defined else None,
         }
 
-    metrics = {"diagnostic_sanity_gap": float(gap)}
+    metrics = {
+        "diagnostic_sanity_gap": float(gap),
+        "diagnostic_initial_sanity_gap": float(initial_gap),
+    }
     if nolead_prevalence is not None:
         metrics["diagnostic_nolead_prevalence"] = nolead_prevalence
     for row in rows:
@@ -818,6 +865,9 @@ def retrain_diagnostic_task(
                     "diagnostic_scale_pos_weight": scale_pos_weight,
                     "diagnostic_all_status": "defined",
                     "diagnostic_nolead_status": nolead_status,
+                    "diagnostic_sanity_iteration": artifact_num_trees,
+                    "diagnostic_actual_trees": actual_trees,
+                    "diagnostic_deterministic_retry": deterministic_retry,
                 }
             )
             mlflow.log_metrics(metrics)
@@ -832,6 +882,9 @@ def retrain_diagnostic_task(
         "metric_iterations": metric_iterations,
         "nolead_prevalence": nolead_prevalence,
         "sanity_gap": float(gap),
+        "initial_sanity_gap": float(initial_gap),
+        "sanity_iteration": artifact_num_trees,
+        "deterministic_retry": deterministic_retry,
         "slices": slice_summaries,
         "hyperparams": {
             "seed": seed,

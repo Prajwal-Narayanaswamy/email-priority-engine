@@ -9,14 +9,11 @@ Two caveats govern every number produced here:
 * PR-AUC (average precision) is the PRIMARY metric. At 0.68% positives ROC-AUC
   overstates the model badly (training logged ROC-AUC = 0.85 alongside class-1
   F1 = 0.12), so ROC-AUC is reported only as secondary context.
-* Operating thresholds are points on inflated, uncalibrated scores — NOT true
-  probabilities. Training uses scale_pos_weight = 145.7 (see SCALE_POS_WEIGHT
-  in src/training/train.py), which rescales the positive class and pushes
-  predicted scores upward: on validation, behavioral-only flags ~5.4% of emails
-  at the default 0.5 cut versus a 0.68% actual positive rate. The optimal
-  operating threshold is therefore likely above 0.5, possibly above 0.95, which
-  is why sweep_thresholds covers every distinct operating point from
-  precision_recall_curve instead of a fixed grid.
+* Operating thresholds are points on class-weighted, uncalibrated scores — NOT
+  true probabilities. Training derives scale_pos_weight from training labels
+  (ADR-012). Historically, weight 145.7 yielded ~5.4% flagged validation emails
+  at 0.5 versus 0.68% positives; those superseded results motivate sweeping
+  every distinct operating point, not assuming the current optimum is near 0.5.
 """
 
 from __future__ import annotations
@@ -61,10 +58,18 @@ _COUNT_COLUMNS: frozenset[str] = frozenset(
 #: Split statistics the reproducibility gate compares. These are the exact keys
 #: train_tasks.py logs as MLflow params for every variant.
 SPLIT_CHECK_KEYS: tuple[str, ...] = (
+    "split_strategy",
+    "split_version",
+    "split_seed",
+    "dedupe_policy",
+    "train_rows",
     "val_rows",
-    "val_positives",
     "test_rows",
+    "train_positives",
+    "val_positives",
     "test_positives",
+    "split_fingerprint",
+    "scale_pos_weight",
 )
 
 
@@ -193,9 +198,10 @@ def sweep_thresholds(
     No fixed grid: thresholds are the distinct model scores returned by
     sklearn's precision_recall_curve, so every point where the prediction set
     changes is evaluated. This matters because the scores are inflated and
-    uncalibrated (scale_pos_weight = 145.7 pushes them upward) — a grid centred
-    on 0.5 would miss the optimum, which the 5.4%-flagged vs 0.68%-positive
-    gap suggests lies above 0.5, possibly above 0.95.
+    uncalibrated (positive-class weighting pushes them upward) — a grid centred
+    on 0.5 could miss the optimum. The historical 5.4%-flagged vs
+    0.68%-positive gap motivated this policy; current weights/metrics come
+    from the clean source run and must be evaluated independently.
 
     Returns:
         The threshold_frame at the PR-curve thresholds, ascending.
@@ -362,39 +368,49 @@ def plot_roc_curve(
 
 
 def verify_split(
-    reconstructed: Mapping[str, int],
+    reconstructed: Mapping[str, Any],
     logged: Mapping[str, Any],
 ) -> None:
     """Split-reproducibility safety gate: reconstructed split vs training run.
 
-    Compares val_rows / val_positives / test_rows / test_positives of a locally
-    reconstructed stratified_split(seed=42) against the same values logged as
-    MLflow params by the training run. The caller fetches the logged params
-    (MLflow access stays in evaluate_tasks.py); this stays pure and testable.
-
-    Logged values are coerced with int(float(str(...))) because MLflow
-    stringifies params. Counts here are far below float's exact-integer range,
-    so the coercion is lossless.
+    Compare ADR-012 strategy/version, split seed, dedupe policy, every split's
+    rows/positives, UID membership fingerprint, and derived training weight.
+    Numeric params may be stringified by MLflow. Missing keys, invalid values,
+    and mismatches are accumulated so every problem is reported in one error.
+    Source-run/tag lookup stays in the task layer.
 
     Raises:
         SplitMismatchError: on any missing key, any non-integer logged value,
             or any count mismatch. Lists every mismatch, not just the first.
     """
     mismatches: list[str] = []
+    text_keys = {"split_strategy", "dedupe_policy", "split_fingerprint"}
     for key in SPLIT_CHECK_KEYS:
         if key not in reconstructed:
-            raise SplitMismatchError(f"reconstructed split is missing {key!r}")
+            mismatches.append(f"reconstructed split is missing {key!r}")
         if key not in logged:
-            raise SplitMismatchError(
-                f"training run params are missing {key!r}; cannot verify the split"
-            )
+            mismatches.append(f"training run params are missing {key!r}")
+        if key not in reconstructed or key not in logged:
+            continue
         try:
-            logged_value = int(float(str(logged[key])))
-        except (TypeError, ValueError) as exc:
-            raise SplitMismatchError(
-                f"logged {key}={logged[key]!r} is not an integer"
-            ) from exc
-        rebuilt_value = int(reconstructed[key])
+            if key in text_keys:
+                logged_value = str(logged[key])
+                rebuilt_value = str(reconstructed[key])
+            else:
+                logged_value = float(logged[key])
+                rebuilt_value = float(reconstructed[key])
+                if not np.isfinite(logged_value) or not np.isfinite(rebuilt_value):
+                    raise ValueError("non-finite value")
+                if key != "scale_pos_weight" and (
+                    not logged_value.is_integer() or not rebuilt_value.is_integer()
+                ):
+                    raise ValueError("non-integer value")
+        except (TypeError, ValueError):
+            mismatches.append(
+                f"invalid {key}: reconstructed={reconstructed[key]!r} "
+                f"logged={logged[key]!r}"
+            )
+            continue
         if rebuilt_value != logged_value:
             mismatches.append(
                 f"{key}: reconstructed={rebuilt_value} logged={logged_value}"

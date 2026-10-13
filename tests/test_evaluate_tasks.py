@@ -32,13 +32,19 @@ from src.tasks.evaluate_tasks import (
     retrain_diagnostic_task,
     summarize_drift,
 )
+from src.training.splits import (
+    SPLIT_STRATEGY,
+    SPLIT_VERSION,
+    grouped_split,
+    split_fingerprint,
+)
 from src.training.train import (
     BEHAVIORAL_FEATURES,
     SPLIT_SEED,
     TARGET,
     build_matrices,
     build_model,
-    stratified_split,
+    scale_pos_weight_from_labels,
     train_model,
 )
 
@@ -59,15 +65,18 @@ def eval_frame() -> pd.DataFrame:
             "subject_length": rng.integers(5, 120, size=N_ROWS),
             "has_question_mark": rng.integers(0, 2, size=N_ROWS),
             "thread_depth": rng.integers(0, 6, size=N_ROWS),
+            "uid": [f"email-{i}" for i in range(N_ROWS)],
+            "from": [f"sender-{i // 2}@example.com" for i in range(N_ROWS)],
+            "subject": [f"topic {i // 2}" for i in range(N_ROWS)],
         }
     )
-    assert set(BEHAVIORAL_FEATURES) == set(frame.columns) - {TARGET}
+    assert set(BEHAVIORAL_FEATURES) <= set(frame.columns)
     return frame
 
 
 @pytest.fixture
 def eval_splits(eval_frame: pd.DataFrame) -> dict[str, pd.DataFrame]:
-    train_df, val_df, test_df = stratified_split(eval_frame, seed=11)
+    train_df, val_df, test_df = grouped_split(eval_frame, seed=42)
     return {"train": train_df, "val": val_df, "test": test_df}
 
 
@@ -80,12 +89,10 @@ def tiny_model(eval_splits: dict[str, pd.DataFrame]):
         train_df, feature_columns=BEHAVIORAL_FEATURES, use_tfidf=False
     )
     x_val = build_matrices(val_df, feature_columns=BEHAVIORAL_FEATURES, use_tfidf=False)
-    # Preserve this legacy diagnostic fixture's source-run parameters; the
-    # standalone builder no longer defaults to a dataset-specific weight.
     model = build_model(
         n_estimators=20,
         random_state=42,
-        scale_pos_weight=float(DIAG_PARAMS["scale_pos_weight"]),
+        scale_pos_weight=scale_pos_weight_from_labels(train_df[TARGET]),
     )
     model, _ = train_model(
         model,
@@ -119,11 +126,14 @@ def quiet_logger(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture
-def fake_client_cls(monkeypatch: pytest.MonkeyPatch):
+def fake_client_cls(
+    monkeypatch: pytest.MonkeyPatch, eval_splits: dict[str, pd.DataFrame]
+):
     """Configurable MlflowClient stand-in (params + logged models per test)."""
 
     class FakeClient:
-        params: dict[str, Any] = {}
+        params: dict[str, Any] = split_params(eval_splits)
+        tags: dict[str, str] = {}
         models: list[Any] = []
         last_filter: str = ""
 
@@ -134,7 +144,9 @@ def fake_client_cls(monkeypatch: pytest.MonkeyPatch):
             return SimpleNamespace(experiment_id="1")
 
         def get_run(self, run_id: str) -> Any:
-            return SimpleNamespace(data=SimpleNamespace(params=dict(self.params)))
+            return SimpleNamespace(
+                data=SimpleNamespace(params=dict(self.params), tags=dict(self.tags))
+            )
 
         def search_logged_models(
             self, experiment_ids: list[str] | None = None, filter_string: str = ""
@@ -150,15 +162,25 @@ def split_params(
     splits: dict[str, pd.DataFrame], variant: str = "behavioral-only"
 ) -> dict[str, str]:
     """Source-run params matching the given splits (stringified, like MLflow)."""
-    val_df = splits["val"]
-    test_df = splits["test"]
-    return {
+    params = {
         "variant": variant,
-        "val_rows": str(len(val_df)),
-        "val_positives": str(int((val_df[TARGET] == 1).sum())),
-        "test_rows": str(len(test_df)),
-        "test_positives": str(int((test_df[TARGET] == 1).sum())),
+        "split_strategy": SPLIT_STRATEGY,
+        "split_version": str(SPLIT_VERSION),
+        "split_seed": "42",
+        "seed": "42",
+        "dedupe_policy": "exact (from, subject, date), keep first",
+        "split_fingerprint": split_fingerprint(
+            splits["train"], splits["val"], splits["test"]
+        ),
+        "scale_pos_weight": str(scale_pos_weight_from_labels(splits["train"][TARGET])),
+        "learning_rate": "0.05",
+        "num_leaves": "31",
+        "n_estimators": "20",
     }
+    for name, frame in splits.items():
+        params[f"{name}_rows"] = str(len(frame))
+        params[f"{name}_positives"] = str(int((frame[TARGET] == 1).sum()))
+    return params
 
 
 # --------------------------------------------------------------------------
@@ -170,14 +192,18 @@ def test_load_split_task_reads_only_needed_columns(
     tmp_path: Path, eval_frame: pd.DataFrame, quiet_logger: None
 ) -> None:
     bloated = eval_frame.copy()
-    bloated["subject"] = "lunch"
     bloated["body"] = "see you at noon"
-    bloated["uid"] = "0"
     path = tmp_path / "features.parquet"
     bloated.to_parquet(path)
     splits = load_split_task.fn(path)
     for split_df in splits.values():
-        assert set(split_df.columns) == {TARGET, *BEHAVIORAL_FEATURES}
+        assert set(split_df.columns) == {
+            "uid",
+            "from",
+            "subject",
+            TARGET,
+            *BEHAVIORAL_FEATURES,
+        }
     assert sum(len(split_df) for split_df in splits.values()) == N_ROWS
 
 
@@ -228,6 +254,25 @@ def test_load_model_task_raises_on_two_models(
         load_model_task.fn(DEFAULT_SOURCE_RUN_ID)
 
 
+@pytest.mark.parametrize("trees", [1, 1886])
+def test_load_model_logs_tree_counts_and_warns_only_for_single_tree(
+    fake_client_cls: Any,
+    mock_mlflow: MagicMock,
+    monkeypatch: pytest.MonkeyPatch,
+    trees: int,
+) -> None:
+    fake_client_cls.models = [SimpleNamespace(model_id="m-counts", name="model")]
+    model = MagicMock()
+    model.best_iteration_ = trees
+    model.booster_.num_trees.return_value = trees
+    mock_mlflow.sklearn.load_model.return_value = model
+    logger = MagicMock()
+    monkeypatch.setattr(evaluate_tasks, "get_run_logger", lambda: logger)
+    load_model_task.fn()
+    assert logger.warning.call_count == int(trees == 1)
+    assert logger.info.call_args.args[-2:] == (trees, trees)
+
+
 # --------------------------------------------------------------------------
 # evaluate_variant_task
 # --------------------------------------------------------------------------
@@ -245,6 +290,40 @@ def test_evaluate_variant_task_gate_aborts_on_mismatch(
         evaluate_variant_task.fn(
             MagicMock(), eval_splits, source_run_id=DEFAULT_SOURCE_RUN_ID
         )
+
+
+@pytest.mark.parametrize("case", ["fingerprint", "strategy", "missing", "superseded"])
+def test_evaluation_gate_aborts_before_scoring_or_logging(
+    eval_splits: dict[str, pd.DataFrame],
+    fake_client_cls: Any,
+    mock_mlflow: MagicMock,
+    quiet_logger: None,
+    case: str,
+) -> None:
+    fake_client_cls.params = split_params(eval_splits)
+    if case == "fingerprint":
+        fake_client_cls.params["split_fingerprint"] = "wrong-membership"
+    elif case == "strategy":
+        fake_client_cls.params["split_strategy"] = "random-stratified"
+    elif case == "missing":
+        del fake_client_cls.params["split_fingerprint"]
+        del fake_client_cls.params["split_strategy"]
+    else:
+        fake_client_cls.tags = {"superseded": "duplicate-leaky-split"}
+    model = MagicMock()
+    with pytest.raises(SplitMismatchError) as error:
+        evaluate_variant_task.fn(model, eval_splits, source_run_id="legacy-run")
+    if case in ("missing", "superseded"):
+        message = str(error.value)
+        assert "superseded run from the duplicate-leaky split" in message
+        assert "legacy-run" in message
+        assert DEFAULT_SOURCE_RUN_ID in message
+    if case == "missing":
+        assert "split_strategy" in str(error.value)
+        assert "split_fingerprint" in str(error.value)
+    model.predict_proba.assert_not_called()
+    mock_mlflow.start_run.assert_not_called()
+    mock_mlflow.log_metrics.assert_not_called()
 
 
 def test_evaluate_variant_task_rejects_wrong_variant(
@@ -279,6 +358,8 @@ def test_evaluate_variant_task_logs_eval_run_tags_and_params(
     assert params["source_run_id"] == DEFAULT_SOURCE_RUN_ID
     assert params["tuned_threshold"] == summary["tuned_threshold"]
     assert params["evidently_reference_cap"] == REFERENCE_CAP
+    assert params["split_strategy"] == SPLIT_STRATEGY
+    assert params["split_fingerprint"] == split_params(eval_splits)["split_fingerprint"]
     logged_metrics = mock_mlflow.log_metrics.call_args[0][0]
     for key in (
         "val_f1",
@@ -665,8 +746,13 @@ DIAG_PARAMS: dict[str, str] = {
     "seed": "42",
     "learning_rate": "0.05",
     "num_leaves": "31",
-    "scale_pos_weight": "145.7",
 }
+
+
+def diagnostic_params(
+    splits: dict[str, pd.DataFrame], rounds: int = 20
+) -> dict[str, str]:
+    return {**split_params(splits), **DIAG_PARAMS, "n_estimators": str(rounds)}
 
 
 def artifact_val_pr_auc(tiny_model: Any, eval_splits: dict[str, pd.DataFrame]) -> float:
@@ -684,40 +770,42 @@ def test_diagnostic_passes_gate_and_logs(
     mock_mlflow: MagicMock,
     quiet_logger: None,
 ) -> None:
-    fake_client_cls.params = dict(DIAG_PARAMS)
+    fake_client_cls.params = diagnostic_params(eval_splits, rounds=60)
     artifact = artifact_val_pr_auc(tiny_model, eval_splits)
     summary = retrain_diagnostic_task.fn(
         eval_splits["train"],
         eval_splits["val"],
         "eval-run-id",
         artifact,
-        n_estimators=60,
+        artifact_num_trees=tiny_model.booster_.num_trees(),
+        artifact_best_iteration=tiny_model.best_iteration_,
     )
 
-    assert summary["snapshots"] == [1, 10, 50]
-    assert summary["metric_iterations"] == [1, 10, 50]
+    expected_probes = sorted({1, 10, 50, tiny_model.best_iteration_, 60})
+    assert summary["snapshots"] == expected_probes
+    assert summary["metric_iterations"] == expected_probes
     assert summary["actual_trees"] == 60
     assert summary["sanity_gap"] < 1e-6
     assert summary["hyperparams"] == {
         "seed": 42,
         "learning_rate": 0.05,
         "num_leaves": 31,
-        "scale_pos_weight": 145.7,
+        "scale_pos_weight": float(fake_client_cls.params["scale_pos_weight"]),
     }
-    assert [row["iteration"] for row in summary["iterations"]] == [1, 10, 50]
+    assert [row["iteration"] for row in summary["iterations"]] == expected_probes
+    assert summary["sanity_iteration"] == tiny_model.booster_.num_trees()
 
     mock_mlflow.start_run.assert_called_once_with(run_id="eval-run-id")
     assert mock_mlflow.set_tags.call_args[0][0] == {"diagnostic_retrain": "true"}
     params = mock_mlflow.log_params.call_args[0][0]
     assert params["diagnostic_n_estimators"] == 60
     logged_metrics = mock_mlflow.log_metrics.call_args[0][0]
-    for count in (1, 10, 50):
+    for count in expected_probes:
         assert f"diagnostic_retrain_{count}_pr_auc" in logged_metrics
         assert f"diagnostic_retrain_{count}_nolead_pr_auc" in logged_metrics
-    assert (
-        len([key for key in logged_metrics if key.startswith("diagnostic_retrain_")])
-        == 6
-    )
+    assert len(
+        [key for key in logged_metrics if key.startswith("diagnostic_retrain_")]
+    ) == 2 * len(expected_probes)
     nolead = eval_splits["val"].loc[
         eval_splits["val"]["sender_is_leadership"] == 0, TARGET
     ]
@@ -728,7 +816,7 @@ def test_diagnostic_passes_gate_and_logs(
     assert artifact_calls[0][1]["artifact_path"] == "diagnostics"
 
 
-@pytest.mark.parametrize("rounds", [101, 1000])
+@pytest.mark.parametrize(("rounds", "artifact_trees"), [(120, 7), (2000, 1886)])
 def test_diagnostic_fixed_metrics_and_artifact_only_curve_points(
     eval_splits: dict[str, pd.DataFrame],
     fake_client_cls: Any,
@@ -736,16 +824,26 @@ def test_diagnostic_fixed_metrics_and_artifact_only_curve_points(
     quiet_logger: None,
     monkeypatch: pytest.MonkeyPatch,
     rounds: int,
+    artifact_trees: int,
 ) -> None:
     """Controlled trajectories verify slice selection, CSVs, and fit parameters."""
-    fake_client_cls.params = dict(DIAG_PARAMS)
+    fake_client_cls.params = diagnostic_params(eval_splits, rounds)
+    fake_client_cls.params["scale_pos_weight"] = "123.0"
     val = eval_splits["val"].iloc[:4].copy()
     val[TARGET] = [1, 0, 1, 0]
     val["sender_is_leadership"] = [1, 0, 0, 0]
-    probes = [k for k in (1, 10, 50, 101, 300, 600, 1000) if k <= rounds]
-    artifact_points = sorted(set(probes) | set(range(50, rounds + 1, 50)))
+    probes = sorted(
+        k
+        for k in {1, 10, 50, 100, 300, 600, 1000, 1500, artifact_trees, rounds}
+        if k <= rounds
+    )
+    artifact_points = sorted(set(probes) | set(range(100, rounds + 1, 100)))
     scores = {
-        k: np.array([0.9, 0.3, 0.8, 0.1]) if k == 50 else np.array([0.9, 0.8, 0.2, 0.1])
+        k: (
+            np.array([0.9, 0.3, 0.8, 0.1])
+            if k in (50, artifact_trees)
+            else np.array([0.9, 0.8, 0.2, 0.1])
+        )
         for k in artifact_points
     }
     model = MagicMock()
@@ -763,19 +861,20 @@ def test_diagnostic_fixed_metrics_and_artifact_only_curve_points(
         eval_splits["train"],
         val,
         "eval-run-id",
-        pr_auc(val[TARGET], scores[1]),
-        n_estimators=rounds,
+        pr_auc(val[TARGET], scores[artifact_trees]),
+        artifact_num_trees=artifact_trees,
+        artifact_best_iteration=artifact_trees,
     )
     assert [
         call.kwargs["num_iteration"] for call in model.predict_proba.call_args_list
-    ] == artifact_points
+    ] == [artifact_trees] + [k for k in artifact_points if k != artifact_trees]
     assert all(
         call.args[0].shape[0] == 4 for call in model.predict_proba.call_args_list
     )
     assert model.fit.call_args.kwargs == {}  # no eval set or early stopping callbacks
     assert len(model.fit.call_args.args) == 2
     factory.assert_called_once_with(
-        scale_pos_weight=145.7,
+        scale_pos_weight=123.0,
         n_estimators=rounds,
         learning_rate=0.05,
         num_leaves=31,
@@ -804,7 +903,7 @@ def test_diagnostic_fixed_metrics_and_artifact_only_curve_points(
             "status": "defined",
             "rows": len(labels),
             "positives": int(labels.sum()),
-            "best_iteration": 50,
+            "best_iteration": min(50, artifact_trees),
             "best_pr_auc": 1.0,
             "first_pr_auc": expected[0],
             "final_pr_auc": expected[-1],
@@ -816,7 +915,10 @@ def test_diagnostic_fixed_metrics_and_artifact_only_curve_points(
         if key.startswith("diagnostic_retrain_")
     }
     assert len(probe_metrics) == 2 * len(probes)
-    assert len(probe_metrics) <= 14
+    assert len(probe_metrics) <= 20
+    assert result["sanity_iteration"] == artifact_trees
+    assert result["sanity_gap"] == 0.0
+    assert result["deterministic_retry"] is False
     for k in probes:
         assert probe_metrics[f"diagnostic_retrain_{k}_pr_auc"] == pr_auc(
             val[TARGET], scores[k]
@@ -842,7 +944,7 @@ def test_diagnostic_undefined_nolead_scores_are_not_logged(
     quiet_logger: None,
     empty: bool,
 ) -> None:
-    fake_client_cls.params = dict(DIAG_PARAMS)
+    fake_client_cls.params = diagnostic_params(eval_splits)
     val = eval_splits["val"].copy()
     val["sender_is_leadership"] = 1 if empty else val[TARGET]
     changed_splits = {**eval_splits, "val": val}
@@ -852,7 +954,8 @@ def test_diagnostic_undefined_nolead_scores_are_not_logged(
         val,
         "eval-run-id",
         artifact,
-        n_estimators=3,
+        artifact_num_trees=tiny_model.booster_.num_trees(),
+        artifact_best_iteration=tiny_model.best_iteration_,
     )
     summary = result["slices"]["nolead"]
     assert summary["status"] == ("empty_slice" if empty else "no_positive_labels")
@@ -870,8 +973,12 @@ def test_diagnostic_undefined_nolead_scores_are_not_logged(
         assert metrics["diagnostic_nolead_prevalence"] == 0.0
 
 
-def test_diagnostic_default_is_1000_rounds() -> None:
-    assert retrain_diagnostic_task.fn.__defaults__[-1] == 1000
+def test_diagnostic_round_limit_has_no_independent_default() -> None:
+    import inspect
+
+    assert (
+        "n_estimators" not in inspect.signature(retrain_diagnostic_task.fn).parameters
+    )
 
 
 def test_diagnostic_gate_failure_aborts_before_logging(
@@ -881,7 +988,7 @@ def test_diagnostic_gate_failure_aborts_before_logging(
     mock_mlflow: MagicMock,
     quiet_logger: None,
 ) -> None:
-    fake_client_cls.params = dict(DIAG_PARAMS)
+    fake_client_cls.params = diagnostic_params(eval_splits)
     artifact = artifact_val_pr_auc(tiny_model, eval_splits)
     with pytest.raises(DiagnosticMismatchError, match="diverged"):
         retrain_diagnostic_task.fn(
@@ -889,13 +996,61 @@ def test_diagnostic_gate_failure_aborts_before_logging(
             eval_splits["val"],
             "eval-run-id",
             artifact + 0.05,
-            n_estimators=20,
+            artifact_num_trees=tiny_model.booster_.num_trees(),
+            artifact_best_iteration=tiny_model.best_iteration_,
         )
     mock_mlflow.log_artifact.assert_not_called()
     mock_mlflow.log_metrics.assert_not_called()
     mock_mlflow.log_params.assert_not_called()
     mock_mlflow.set_tags.assert_not_called()
     mock_mlflow.start_run.assert_not_called()
+
+
+@pytest.mark.parametrize("retry_passes", [True, False])
+def test_diagnostic_retries_deterministic_single_thread_before_logging(
+    eval_splits: dict[str, pd.DataFrame],
+    fake_client_cls: Any,
+    mock_mlflow: MagicMock,
+    quiet_logger: None,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    retry_passes: bool,
+) -> None:
+    fake_client_cls.params = diagnostic_params(eval_splits)
+    val = eval_splits["val"].iloc[:4].copy()
+    val[TARGET] = [1, 0, 1, 0]
+    val["sender_is_leadership"] = [1, 0, 0, 0]
+    bad = np.array([0.9, 0.8, 0.2, 0.1])
+    good = np.array([0.9, 0.3, 0.8, 0.1])
+    models = []
+    for scores in (bad, good if retry_passes else bad):
+        model = MagicMock()
+        model.booster_.num_trees.return_value = 20
+        model.predict_proba.return_value = np.column_stack((1 - scores, scores))
+        models.append(model)
+    factory = MagicMock(side_effect=models)
+    monkeypatch.setattr(evaluate_tasks, "build_model", factory)
+    args = (eval_splits["train"], val, "eval-run-id", 1.0)
+    kwargs = {"artifact_num_trees": 2, "artifact_best_iteration": 2}
+    if retry_passes:
+        result = retrain_diagnostic_task.fn(*args, **kwargs)
+        assert result["deterministic_retry"] is True
+        assert result["sanity_gap"] == 0.0
+        assert result["initial_sanity_gap"] > 1e-6
+    else:
+        with pytest.raises(
+            DiagnosticMismatchError, match="deterministic single-thread"
+        ):
+            retrain_diagnostic_task.fn(*args, **kwargs)
+        mock_mlflow.start_run.assert_not_called()
+        mock_mlflow.log_metrics.assert_not_called()
+        mock_mlflow.log_artifact.assert_not_called()
+    assert factory.call_count == 2
+    models[0].set_params.assert_not_called()
+    models[1].set_params.assert_called_once_with(
+        deterministic=True, num_threads=1, n_jobs=1
+    )
+    assert "retrying deterministic=True, num_threads=1" in caplog.text
 
 
 def test_diagnostic_rejects_non_finite_artifact_pr_auc(
@@ -910,7 +1065,8 @@ def test_diagnostic_rejects_non_finite_artifact_pr_auc(
             eval_splits["val"],
             "eval-run-id",
             float("nan"),
-            n_estimators=20,
+            artifact_num_trees=1,
+            artifact_best_iteration=1,
         )
 
 
@@ -920,16 +1076,16 @@ def test_diagnostic_rejects_missing_training_param(
     mock_mlflow: MagicMock,
     quiet_logger: None,
 ) -> None:
-    fake_client_cls.params = {
-        key: value for key, value in DIAG_PARAMS.items() if key != "num_leaves"
-    }
+    fake_client_cls.params = diagnostic_params(eval_splits)
+    del fake_client_cls.params["num_leaves"]
     with pytest.raises(ValueError, match="num_leaves"):
         retrain_diagnostic_task.fn(
             eval_splits["train"],
             eval_splits["val"],
             "eval-run-id",
             0.5,
-            n_estimators=20,
+            artifact_num_trees=1,
+            artifact_best_iteration=1,
         )
 
 
@@ -939,7 +1095,7 @@ def test_diagnostic_rejects_non_numeric_training_param(
     mock_mlflow: MagicMock,
     quiet_logger: None,
 ) -> None:
-    fake_client_cls.params = dict(DIAG_PARAMS)
+    fake_client_cls.params = diagnostic_params(eval_splits)
     fake_client_cls.params["learning_rate"] = "fast"
     with pytest.raises(ValueError, match="non-numeric"):
         retrain_diagnostic_task.fn(
@@ -947,7 +1103,8 @@ def test_diagnostic_rejects_non_numeric_training_param(
             eval_splits["val"],
             "eval-run-id",
             0.5,
-            n_estimators=20,
+            artifact_num_trees=1,
+            artifact_best_iteration=1,
         )
 
 

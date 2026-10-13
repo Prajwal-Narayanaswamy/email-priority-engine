@@ -26,7 +26,6 @@ from prefect import flow, get_run_logger  # noqa: E402
 
 from src.tasks.evaluate_tasks import (  # noqa: E402
     DEFAULT_SOURCE_RUN_ID,
-    DIAGNOSTIC_ESTIMATORS,
     REFERENCE_CAP,
     TRACKING_URI,
     evaluate_variant_task,
@@ -44,7 +43,6 @@ def evaluate_flow(
     source_run_id: str = DEFAULT_SOURCE_RUN_ID,
     seed: int = SPLIT_SEED,
     reference_cap: int = REFERENCE_CAP,
-    n_estimators: int = DIAGNOSTIC_ESTIMATORS,
 ) -> dict[str, Any]:
     """Evaluate behavioral-only end to end and return the three summaries.
 
@@ -53,7 +51,6 @@ def evaluate_flow(
         source_run_id: Training run under evaluation (behavioral-only).
         seed: Split seed; must reproduce the training split exactly.
         reference_cap: Evidently train-reference row cap.
-        n_estimators: Boosting rounds for the diagnostic retrain.
 
     Returns:
         Dict with the `evaluation`, `diagnostic`, and `drift` summaries.
@@ -70,6 +67,7 @@ def evaluate_flow(
         splits,
         source_run_id=source_run_id,
         reference_cap=reference_cap,
+        seed=seed,
     )
     diagnostic = retrain_diagnostic_task(
         splits["train"],
@@ -77,7 +75,8 @@ def evaluate_flow(
         evaluation["run_id"],
         evaluation["val"]["pr_auc"],
         source_run_id=source_run_id,
-        n_estimators=n_estimators,
+        artifact_num_trees=evaluation["loaded_num_trees"],
+        artifact_best_iteration=evaluation["source_best_iteration"],
     )
     drift = evidently_baseline_task(
         splits["train"],
@@ -123,18 +122,11 @@ def evaluate_flow(
     default=REFERENCE_CAP,
     help="Evidently train-reference row cap.",
 )
-@click.option(
-    "--n-estimators",
-    type=click.IntRange(min=1),
-    default=DIAGNOSTIC_ESTIMATORS,
-    help="Boosting rounds for the diagnostic retrain (early stopping off).",
-)
 def main(
     input_path: Path,
     source_run_id: str,
     seed: int,
     reference_cap: int,
-    n_estimators: int,
 ) -> None:
     """CLI entry point: run the evaluation flow."""
     evaluate_flow(
@@ -142,7 +134,6 @@ def main(
         source_run_id=source_run_id,
         seed=seed,
         reference_cap=reference_cap,
-        n_estimators=n_estimators,
     )
 
 
