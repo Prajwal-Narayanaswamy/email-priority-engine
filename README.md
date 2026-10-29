@@ -92,7 +92,7 @@ python -m pytest tests/ -q
 
 | Stage | Status |
 |---|---|
-| Serving API | **NOT STARTED** |
+| Serving API | **Minimal version built** (`/health`, `/predict`, `/model-info`; reference model, no Docker/batch/metrics yet) |
 | Live monitoring | **NOT STARTED** |
 | CI/CD for ML: automated retraining/promotion/deployment | **NOT STARTED** |
 | ONNX export and runtime validation | **NOT STARTED** |
