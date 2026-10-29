@@ -10,7 +10,7 @@ dependencies = [
 
     # ML
     "scikit-learn>=1.5.0",
-    "lightgbm>=4.3.0",
+    "lightgbm>=4.7.0",
     "onnx>=1.16.0",
     "onnxruntime>=1.18.0",
     "skl2onnx>=0.5.0",
@@ -19,7 +19,7 @@ dependencies = [
     "nltk>=3.8.0",
 
     # Data
-    "pandas>=2.2.0",
+    "pandas>=2.2.0,<3",  # evidently 0.7.x imports pandas internals removed in 3.0
     "pyarrow>=16.0.0",
     "numpy>=1.26.0",
     "scipy>=1.13.0",
@@ -28,6 +28,9 @@ dependencies = [
 
     # Experiment tracking
     "mlflow>=2.13.0",
+
+    # Plotting (feature importance, evaluation reports)
+    "matplotlib>=3.8.0",
 
     # Serving
     "fastapi>=0.111.0",
@@ -63,7 +66,16 @@ target-version = ["py312"]
 [tool.ruff]
 line-length = 88
 target-version = "py312"
+
+[tool.ruff.lint]
 select = ["E", "F", "I", "N", "W", "UP"]
+
+[tool.ruff.lint.per-file-ignores]
+# X / X_train / X_val are the standard scikit-learn ML naming convention and are
+# kept deliberately. pep8-naming stays enforced everywhere else.
+"src/training/train.py" = ["N803"]
+"src/tasks/train_tasks.py" = ["N806"]
+"tests/test_train.py" = ["N803", "N806"]
 
 [tool.isort]
 profile = "black"

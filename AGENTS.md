@@ -1,5 +1,17 @@
 # Agent Instructions — OpenCode / Big Pickle
 
+## Git Workflow (production style)
+- Never commit directly to `main`. `main` is always deployable.
+- Every feature/fix gets its own branch: `feature/<slug>` or `fix/<slug>`,
+  branched from the latest `main`.
+- Commit in small, focused chunks with conventional-commit messages:
+  `feat:`, `fix:`, `test:`, `docs:`, `refactor:`, `chore:`.
+- Push the branch to origin and open a PR via the GitHub compare URL
+  (no `gh` CLI installed). Wait for the user to merge; do not self-merge.
+- Before branching off, `git pull origin main` to stay current.
+- After a merge, update SESSION_LOG.md and sweep branches
+  (`git branch -d <feature>`).
+
 ## Before Every Session
 1. Read SESSION_LOG.md — find the latest entry, read "Next session — exact first action"
 2. Read ARCHITECTURE.md — do not suggest changes to ADR decisions without flagging first
