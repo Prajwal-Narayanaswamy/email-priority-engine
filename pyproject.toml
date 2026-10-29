@@ -19,7 +19,7 @@ dependencies = [
     "nltk>=3.8.0",
 
     # Data
-    "pandas>=2.2.0",
+    "pandas>=2.2.0,<3",  # evidently 0.7.x imports pandas internals removed in 3.0
     "pyarrow>=16.0.0",
     "numpy>=1.26.0",
     "scipy>=1.13.0",
