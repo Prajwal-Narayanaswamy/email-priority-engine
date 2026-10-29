@@ -156,8 +156,19 @@ is deferred and not built (ADR-011).
 
 The old pitch treated removing keywords as making the model honest, used a
 fixed class weight, and omitted duplicate overlap. Those claims were corrected.
-Seven old MLflow runs were tagged superseded before the clean training runs;
-their artifacts were preserved.
+Seven MLflow runs carry `superseded=duplicate-leaky-split`; their artifacts
+were preserved. The session log describes them as old runs tagged before the
+documented clean training runs, but a later metadata audit found a discrepancy:
+`bfcaf6e3d17246a38f40b77a652dfe7c` (keyword) and
+`e4970b2cbe414ce3b1ec91b007d73cfe` (behavioral) record the same grouped-split
+fingerprint, deduplication policy, split counts, and class weight as the
+documented clean runs. Their duplicate-leaky supersession reason is therefore
+unresolved, not established by the stored provenance. The exact tagging command,
+its selected-run output, and an individual explanation for these runs were not
+found in the inspected records. Existing tags are preserved as audit evidence;
+matching metadata and metrics do not establish identical model artifacts.
+ADR-013's evaluated reference remains `7189707b198f47748f89965712eee4bc`, with
+baseline/CI evaluation `559ccf6356494eecabb332c47eff2105`.
 
 The following are **audit-only legacy records**, not current performance to
 quote. No valid clean-split baseline-and-interval comparison accompanies these
