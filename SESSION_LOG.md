@@ -7,6 +7,142 @@ Be specific. "Worked on features" is useless. "Ran feature_flow.py, got KeyError
 sender column, traced to ingest output missing sender_email field" is useful.
 ---
 
+### Session: 2026-11-01 (Code commit 8f02eb1, README rework, Docker-stage audit)
+**Stage:** Serving code committed; docs (ARCHITECTURE.md, README.md, this log) UNCOMMITTED
+pending review; Docker stage planned, nothing built. Nothing pushed.
+
+**What I completed:**
+- Committed code, tests and .env.example as `8f02eb1` (feat(serving): registry-backed
+  model loading, versioned sender lookup, registration scripts). The user verified the
+  full suite first: 349 passed in 361s.
+- README: test count 349, Lay example with `date` (score 0.5446273611788119), new
+  `## Serving` section, ingest command and archive source in Run, Roadmap row "Docker
+  image: NEXT", ADR-001 through ADR-014. No measured number changed.
+- Read-only Docker audit (no build): Dockerfile `CMD` points at the nonexistent
+  `src.serving.main:app`, `HEALTHCHECK` uses curl (absent in python:3.12-slim),
+  `pip install -e .` runs before source is copied and installs the full dependency list,
+  no `.dockerignore`, no non-root user. Compose pins mlflow v2.13.0 against the project's
+  3.15.1, mounts missing paths, sets env vars nothing reads, and scrapes a `/metrics`
+  that does not exist. CI builds the broken Dockerfile; `scripts/` is not linted.
+- `docker version`: Windows client 28.1.1 and Compose v2.35.1-desktop.1, engine NOT
+  running; no `docker` in the Ubuntu-24.04 distro (Docker Desktop WSL integration off).
+
+**Open flags:**
+- The CMU URL in README Run section is from my own knowledge, unverified; no CMU
+  citation existed anywhere in the repo.
+- serving imports `BEHAVIORAL_FEATURES` from `src.training.train` (pulls in matplotlib);
+  skops is not declared in pyproject (arrives only via full mlflow).
+
+**Next session — first thing to do:**
+> Review the README diff and Docker-stage plan (8 bullets). Start Docker Desktop and
+> enable WSL integration for Ubuntu-24.04. On approval: bundle export script,
+> `MODEL_SOURCE`, then Dockerfile/.dockerignore/compose, ADR-015.
+
+---
+
+### Session: 2026-11-01 (ADR-014 Step 3b: tracking-URI root cause, partial-state registration, caveat correction)
+**Stage:** Fixes written and tested against temp sqlite DBs; UNCOMMITTED pending the user's full suite.
+
+**What the user found running Step 3a (their terminal):**
+- Full suite 338 passed, 2 errors: the real_lookup fixture hit a v1 lookup file
+  (rebuilt since). `register_reference_model --apply` failed once: MLflow's registry
+  store `create_model_version` builds a default `MlflowClient()` that reads the GLOBAL
+  tracking URI, which was the refused `./mlruns` file store with MLFLOW_TRACKING_URI
+  unset; it left an empty registered model `email-priority`. With the env var exported
+  the registration succeeded: version 1, alias champion (REAL registry now holds it;
+  do not re-register). My Step 3a tests passed only because they set the global URI.
+- A live `/predict` for kenneth.lay@enron.com ("RE: budget?", sender_frequency 21)
+  scored 0.5446, flagged false at 0.9943: the "flag equals the leadership-only rule"
+  caveat was an observation on the test split, not a property of all inputs.
+
+**What I completed:**
+- Root cause: `registry.configure_mlflow(uri)` sets the global tracking AND registry
+  URIs; serving startup (`build_predictor`), `load_model` and both scripts call it
+  before creating any client. API starts with MLFLOW_TRACKING_URI unset.
+- Regression tests (poisoned globals: nonexistent file store, MLFLOW_ALLOW_FILE_STORE
+  unset, only config.TRACKING_URI knows the temp sqlite DB). Run against the OLD
+  code they failed as expected: register CLI `--apply` printed the plan then exited
+  non-zero; serving startup raised the file-store "maintenance mode" refusal. The
+  log_lookup CLI test passed on old code (it only uses explicit clients) and stays as a
+  guard. After the fix all pass. Two failures in that first run were bugs in my new
+  tests (dry-run test did not patch TRACKING_URI so it READ the real registry,
+  read-only; and int-vs-str version compare); fixed.
+- Found that `set_tracking_uri`/`set_registry_uri` also write MLFLOW_TRACKING_URI /
+  MLFLOW_REGISTRY_URI into os.environ; added `tests/serving_helpers.isolated_mlflow`
+  (used by the `mlflow_globals` fixture and the local parity fixture) so tests
+  restore globals and env.
+- `apply_plan` reuses an existing registered model (also tolerates it appearing
+  between plan and apply); the plan lists what it found ("exists with no versions
+  ... will be reused"). Still refuses if a version exists for the source run or
+  champion is set anywhere; tests cover partial state and refusal (CLI exit 1).
+- Local parity test skips with a clear message on a stale lookup (LookupFormatError)
+  or missing alias.
+- Caveats shortened to the reference-model/heuristic-labels/uncalibrated-score
+  statements plus the test-split statement; internal run text removed. `/predict`
+  now returns a one-line `note` (field renamed from `caveats`); full caveats only on
+  `/model-info`. Corrected wording in the code, ADR-014 (decision 4 and limitations),
+  README (with the Lay illustration) and the Step 2 log line. ADR-013 and
+  PROJECT_NARRATIVE statements were checked and are already scoped to the
+  validation/test splits, so they were left unchanged.
+- ADR-014 note: MLflow internals create default clients, so the URIs must be set
+  globally in every entry point and in the Docker container's environment.
+- black/ruff/isort clean. Targeted: 83 passed + registration file 15 passed. Real
+  mlflow.db sha256 8ce61c5fea99fe5c... size 1228800 identical before and after each
+  agent run; mlruns/ tree unchanged. Full suite and real-registry commands NOT run
+  by the agent.
+
+**Next session — exact first action:**
+> User runs the commands printed at the end of this step (full suite, register dry
+> run that must refuse, API + 4 curls with MLFLOW_TRACKING_URI unset). Then review
+> and commit Steps 3a+3b (code, tests, scripts, docs). Docker, batch, /metrics,
+> prediction logging and ONNX remain separate approvals.
+
+---
+
+### Session: 2026-11-01 (ADR-014 Step 3a: registry loading, lookup v2, registration scripts)
+**Stage:** Code and tests written, UNCOMMITTED pending the full suite. Registration NOT applied.
+
+**What I completed:**
+- Committed b2ce7d3 (.gitignore for .claude/settings.local.json). Step 2 was
+  committed earlier as 0a932c7, c970815, 48264d9. No push.
+- Throwaway verification on a toy model in a temp sqlite DB under /tmp (tracking
+  URI asserted; real mlflow.db sha256 f5ff0bbc... and size 1228800 identical
+  before and after, and again after the new tests). Findings on MLflow 3.15.1:
+  the client route (create_registered_model, create_model_version with source
+  models:/<logged-model-id> and model_id=, tags, set_registered_model_alias) works
+  and does NOT write mlflow.modelVersions onto the LoggedModel; mlflow.register_model
+  does. ModelVersion.model_id is None, lineage is the source URI. Errors: missing
+  registered model "Registered Model with name=X not found"; missing alias
+  "Registered model alias X not found."; missing tag is a plain KeyError.
+- Lookup v2: header (format_version, parquet_sha256, row_count, built_at,
+  builder_version) + senders. lookup_sha256 = sha256 of the FILE bytes; the header
+  holds the PARQUET hash. Loader rejects no/malformed header.
+- src/serving/registry.py: ServingMetadata, fetch_serving_metadata (resolves the
+  alias once, reads tags), load_model by resolved version, specific
+  ServingStartupError messages. Run-ID loader and MODEL_RUN_ID/EVAL_RUN_ID removed;
+  MODEL_URI default models:/email-priority@champion, no fallback.
+- src/serving/registration.py + scripts/log_lookup_run.py (separate experiment
+  email-priority-serving, idempotent) + scripts/register_reference_model.py
+  (dry run default, --apply to write; refuses if a version exists for the source
+  run or the champion alias is already set).
+- /model-info now returns version, alias, model URI, threshold source and all tags;
+  /health and /predict carry model_version.
+- Tests: test_registry.py (stub failures), test_registration.py (real MLflow on a
+  tmp sqlite DB), updated test_serving.py and the local parity test (skips if the
+  alias is missing). black/ruff/isort clean. Targeted run: 75 passed in 104s.
+  Full suite and all real-DB steps NOT run by the agent.
+
+**Known limitation recorded in ADR-014:** registered versions point at an absolute
+WSL artifact path; a container cannot load them as-is (Docker-stage ADR).
+
+**Next session — exact first action:**
+> User runs: full suite; rebuild lookup v2; log the lookup run; register dry run;
+> register --apply; start the API and curl /health, /model-info, /predict. Then
+> commit code, tests, scripts and docs. Docker, batch, /metrics, prediction
+> logging and ONNX remain separate approvals.
+
+---
+
 ### Session: 2026-11-01 (ADR-014 Step 2: parity tests and score rename)
 **Stage:** Serving hardening; Step 2 of ADR-014 implemented, UNCOMMITTED pending full suite.
 
@@ -26,7 +162,8 @@ sender column, traced to ingest output missing sender_email field" is useful.
   features; API score == predict_proba to 1e-9 on 200 rows.
 - Renamed response field probability -> score (schemas, predictor, app, tests);
   CAVEATS now say uncalibrated/inflated by scale_pos_weight and flag == leadership-only
-  rule (ADR-013). Added caveat-wording, sentinel/zero/unseen-sender, and
+  rule (ADR-013). [Wording later found false for arbitrary inputs and corrected in
+  the 2026-11-01 Step 3b entry.] Added caveat-wording, sentinel/zero/unseen-sender, and
   startup-failure tests (model, tuned_threshold, lookup file).
 - black/ruff/isort clean. tests/test_serving.py: 23 passed. Full suite and the
   local parity tests NOT run by the agent.

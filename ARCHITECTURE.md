@@ -370,7 +370,7 @@ and label-rule baseline. This decision does not itself implement those stages.
   subject-length proxies (ADR-011), cross-sender subject overlap, and frequency
   computed using held-out emails remain as disclosed in ADR-012.
 
-### ADR-014: Serving contract and decisions (approved, partly implemented)
+### ADR-014: Serving contract and decisions (approved; parity and score rename implemented, registry and lookup v2 code written, registration not yet applied)
 **Context:** A minimal API exists (`GET /health`, `POST /predict`,
 `GET /model-info` in `src/serving/`). It serves the ADR-013 reference model
 and departs from the architecture diagram above:
@@ -403,8 +403,15 @@ and departs from the architecture diagram above:
    missing alias fails startup.
 4. **Score, not probability.** The response field `probability` is renamed
    `score` and documented as an uncalibrated score inflated by
-   `scale_pos_weight`. The caveats state that at the tuned threshold the flag
-   equals the leadership-only rule (ADR-013).
+   `scale_pos_weight`. The caveats state that, on the held-out test split, the
+   flagged rows were exactly the leadership-sender rows (60 of 60; test F1 about
+   0.42, same as the leadership-only rule; non-leadership F1 0), and that this is
+   an empirical property of that split, not a guarantee. The full caveats are
+   returned only by `/model-info`; `/predict` returns a one-line `note`.
+   (Corrected 2026-11-01: an earlier draft said the flag "equals the
+   leadership-only rule" at the tuned threshold, which a live request disproved:
+   `kenneth.lay@enron.com`, `RE: budget?` scored 0.5446 against a 0.9943
+   threshold and was not flagged.)
 5. **Fail loudly.** Startup fails if the model, threshold or lookup is missing
    or the lookup hash mismatches. No degraded or partial serving mode.
 
@@ -417,8 +424,32 @@ and departs from the architecture diagram above:
   already counted in the lookup.
 - `sender_frequency` was computed over all unique emails including held-out
   ones (ADR-012), and the lookup is a static training snapshot.
-- The reference model still reproduces the leadership-only rule at the tuned
-  threshold (ADR-013); registry promotion does not make it a production model.
+- On the held-out test split the reference model's flags coincided with the
+  leadership-only rule (ADR-013), but that is not a property of arbitrary
+  inputs: a leadership sender's email can score below the threshold. Registry
+  promotion does not make it a production model.
+- MLflow internals create default clients (for example the registry store's
+  `create_model_version` builds `MlflowClient()`), which ignore a client's
+  explicit URI and read the global tracking and registry URIs. With
+  `MLFLOW_TRACKING_URI` unset the default is the `./mlruns` file store, which
+  MLflow 3.x refuses. Every entry point (serving startup, registration and
+  lookup-logging scripts) therefore calls `configure_mlflow(config.TRACKING_URI)`
+  before creating any client, and the Docker container's environment must set
+  `MLFLOW_TRACKING_URI` (or run the same entry points). Found when the first
+  `--apply` failed and left an empty registered model, which a re-run now reuses.
+- Registered versions point at an absolute WSL artifact path
+  (`/home/<user>/code/project-a/mlruns/<exp>/models/<model_id>/artifacts`,
+  recorded in the tracking DB). A container or another machine cannot load them
+  as-is. How the model reaches a container (identical-path mount, a baked
+  bundle, or an artifact-serving MLflow server) is a Docker-stage decision to
+  be recorded in its own ADR.
+- `lookup_sha256` is the sha256 of the lookup FILE bytes; the file's header holds
+  the sha256 of the source PARQUET. Registration verifies the header against the
+  current parquet, and startup verifies the file against the tag.
+- Registration uses the MLflow client route (`create_model_version` with a
+  `models:/<logged-model-id>` source), verified on a temporary DB to leave the
+  finished LoggedModel's tags untouched; `mlflow.register_model` would add an
+  `mlflow.modelVersions` tag to it.
 
 **Out of scope for this pass:** Docker, `/predict/batch`, `/metrics`, SQLite
 prediction logging and ONNX. Each needs its own approval.
