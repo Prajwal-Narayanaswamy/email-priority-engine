@@ -7,6 +7,38 @@ Be specific. "Worked on features" is useless. "Ran feature_flow.py, got KeyError
 sender column, traced to ingest output missing sender_email field" is useful.
 ---
 
+### Session: 2026-11-01 (ADR-014 Step 2: parity tests and score rename)
+**Stage:** Serving hardening; Step 2 of ADR-014 implemented, UNCOMMITTED pending full suite.
+
+**What I completed:**
+- Audited serving (read-only). Found: six of seven features reuse features.py;
+  sender_frequency from an untracked JSON; no training-serving parity test existed.
+- Committed ADR-014 as b1ad9a1 (docs only) and the two environment-independence
+  test fixes as f55f253. Also made the sqlite-default tracking-URI test
+  explicit (delenv + reload) so it no longer depends on module state left by
+  an earlier test. No push.
+- Added scripts/build_parity_fixture.py (seed 42, documented selection rules)
+  -> tests/fixtures/serving_parity_rows.parquet. NOT yet built; the user runs it.
+  Selection logic checked on a synthetic frame only (deterministic, unique uids).
+- Added tests/test_serving_parity.py (CI, fixture only; fails loudly if the
+  fixture is missing) and tests/test_serving_parity_local.py (skips cleanly
+  without real parquet, lookup file or model): 2,000 real rows exact on 7
+  features; API score == predict_proba to 1e-9 on 200 rows.
+- Renamed response field probability -> score (schemas, predictor, app, tests);
+  CAVEATS now say uncalibrated/inflated by scale_pos_weight and flag == leadership-only
+  rule (ADR-013). Added caveat-wording, sentinel/zero/unseen-sender, and
+  startup-failure tests (model, tuned_threshold, lookup file).
+- black/ruff/isort clean. tests/test_serving.py: 23 passed. Full suite and the
+  local parity tests NOT run by the agent.
+
+**Next session — exact first action:**
+> Build the fixture, run the full suite, run the local parity tests (commands
+> below), then commit fixture + tests + code. Step 3 (lookup artifact with hash,
+> serving-artifacts run, registry alias) needs separate approval; no MLflow or
+> registry state was touched.
+
+---
+
 ### Session: 2026-10-29 (Minimal serving API for the ADR-013 reference model)
 **Stage:** Serving API implemented and tested; Docker, batch, metrics, prediction logging not started.
 
