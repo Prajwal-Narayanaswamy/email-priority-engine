@@ -10,6 +10,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 from src.labels.labeling import LEADERSHIP_SENDERS
+from src.serving import config
+from src.serving import predictor as predictor_module
 from src.serving.app import app
 from src.serving.lookup import (
     UNSEEN_SENDER_FREQUENCY,
@@ -18,12 +20,18 @@ from src.serving.lookup import (
     save_sender_lookup,
     sender_frequency_for,
 )
-from src.serving.predictor import Predictor, build_feature_row
+from src.serving.predictor import (
+    CAVEATS,
+    Predictor,
+    build_feature_row,
+    load_model,
+    load_threshold,
+)
 from src.training.train import BEHAVIORAL_FEATURES
 
 
 class StubModel:
-    """Returns a high probability only when sender_is_leadership == 1."""
+    """Returns a high score only when sender_is_leadership == 1."""
 
     def predict_proba(self, frame: pd.DataFrame) -> np.ndarray:
         p = frame["sender_is_leadership"].to_numpy(dtype=float) * 0.999
@@ -117,7 +125,124 @@ def test_predict_leadership_sender_flagged(client: TestClient) -> None:
     leader = next(iter(LEADERSHIP_SENDERS))
     body = client.post("/predict", json={"from": leader, "subject": "x"}).json()
     assert body["flagged"] is True
-    assert body["probability"] >= body["threshold"]
+    assert body["score"] >= body["threshold"]
+    assert "probability" not in body
+
+
+@pytest.mark.parametrize("date", [None, "garbage", "", "32 Foo 2001"])
+def test_missing_or_unparseable_date_gives_sentinel(
+    lookup: dict[str, int], date: str | None
+) -> None:
+    row, _ = build_feature_row("a@b.com", "hi", date, lookup)
+    assert row.iloc[0]["hour_of_day"] == -1
+    assert row.iloc[0]["day_of_week"] == -1
+
+
+@pytest.mark.parametrize("sender", [None, "", "   "])
+def test_null_or_empty_sender_gives_zero_frequency(
+    lookup: dict[str, int], sender: str | None
+) -> None:
+    row, seen = build_feature_row(sender, "hi", None, lookup)
+    assert row.iloc[0]["sender_frequency"] == 0
+    assert not seen
+
+
+def test_unseen_sender_gives_frequency_one(lookup: dict[str, int]) -> None:
+    row, seen = build_feature_row("new.person@example.com", "hi", None, lookup)
+    assert row.iloc[0]["sender_frequency"] == UNSEEN_SENDER_FREQUENCY == 1
+    assert not seen
+
+
+def test_caveat_wording(client: TestClient) -> None:
+    for text in (
+        CAVEATS,
+        client.get("/model-info").json()["caveats"],
+        client.post("/predict", json={"subject": "x"}).json()["caveats"],
+    ):
+        assert "uncalibrated" in text
+        assert "scale_pos_weight" in text
+        assert "not a probability" in text
+        assert "leadership-only rule" in text
+        assert "ADR-013" in text
+
+
+class _FailingClient:
+    """MlflowClient stand-in whose lookups find nothing or lack params."""
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        pass
+
+    def get_experiment_by_name(self, name: str) -> None:
+        return None
+
+    def get_run(self, run_id: str) -> object:
+        class _Data:
+            params: dict[str, str] = {}
+
+        class _Run:
+            data = _Data()
+
+        return _Run()
+
+
+def test_load_model_raises_when_experiment_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(predictor_module, "MlflowClient", _FailingClient)
+    monkeypatch.setattr(predictor_module.mlflow, "set_tracking_uri", lambda uri: None)
+    with pytest.raises(ValueError, match="not found"):
+        load_model("some-run")
+
+
+def test_load_threshold_raises_when_param_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(predictor_module, "MlflowClient", _FailingClient)
+    with pytest.raises(KeyError, match="tuned_threshold"):
+        load_threshold("some-eval-run")
+
+
+def _start_app() -> None:
+    app.state.predictor = None
+    with TestClient(app):
+        pass
+
+
+@pytest.fixture
+def clean_app_state() -> Iterator[None]:
+    app.state.predictor = None
+    yield
+    app.state.predictor = None
+
+
+def test_startup_fails_when_model_cannot_load(
+    monkeypatch: pytest.MonkeyPatch, clean_app_state: None
+) -> None:
+    def boom(run_id: str) -> object:
+        raise ValueError("no model")
+
+    monkeypatch.setattr("src.serving.app.load_model", boom)
+    with pytest.raises(ValueError, match="no model"):
+        _start_app()
+
+
+def test_startup_fails_when_threshold_missing(
+    monkeypatch: pytest.MonkeyPatch, clean_app_state: None
+) -> None:
+    monkeypatch.setattr("src.serving.app.load_model", lambda run_id: StubModel())
+    monkeypatch.setattr(predictor_module, "MlflowClient", _FailingClient)
+    with pytest.raises(KeyError, match="tuned_threshold"):
+        _start_app()
+
+
+def test_startup_fails_when_lookup_file_missing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path, clean_app_state: None
+) -> None:
+    monkeypatch.setattr("src.serving.app.load_model", lambda run_id: StubModel())
+    monkeypatch.setattr("src.serving.app.load_threshold", lambda run_id: 0.99)
+    monkeypatch.setattr(config, "SENDER_LOOKUP_PATH", tmp_path / "missing.json")
+    with pytest.raises(FileNotFoundError):
+        _start_app()
 
 
 def test_503_when_model_missing() -> None:

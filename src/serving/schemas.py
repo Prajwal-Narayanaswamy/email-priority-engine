@@ -20,7 +20,12 @@ class EmailIn(BaseModel):
 class PredictionOut(BaseModel):
     """Prediction for one email, always with the model's caveats attached."""
 
-    probability: float
+    score: float = Field(
+        description=(
+            "Uncalibrated model score, inflated by scale_pos_weight; not a "
+            "probability of urgency"
+        )
+    )
     flagged: bool
     threshold: float
     sender_seen_in_training: bool

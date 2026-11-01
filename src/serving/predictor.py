@@ -25,10 +25,11 @@ from src.training.train import BEHAVIORAL_FEATURES, LIMITATION_NOTE
 logger = logging.getLogger(__name__)
 
 CAVEATS: str = (
-    "Reference model (ADR-013). Labels are heuristic (ADR-005). At the "
-    "operating threshold the model flags exactly the leadership-sender rows, "
-    "identical to the leadership-only rule (test F1 ~0.42; non-leadership F1 "
-    "0). Not a genuine urgency predictor. " + LIMITATION_NOTE
+    "Reference model (ADR-013). Labels are heuristic (ADR-005). The score is "
+    "uncalibrated and inflated by scale_pos_weight; it is not a probability. "
+    "At the tuned threshold the flag equals the leadership-only rule "
+    "(ADR-013: test F1 ~0.42; non-leadership F1 0). Not a genuine urgency "
+    "predictor. " + LIMITATION_NOTE
 )
 SENDER_FREQUENCY_NOTE: str = (
     "sender_frequency is a snapshot of training-data counts and does not "
@@ -106,8 +107,12 @@ class Predictor:
     def predict(
         self, sender: str | None, subject: str | None, date: str | None
     ) -> tuple[float, bool, bool, dict[str, float]]:
-        """Return (probability, flagged, sender_seen, features)."""
+        """Return (score, flagged, sender_seen, features).
+
+        The score is the model's uncalibrated class-1 output (inflated by
+        scale_pos_weight), compared against the validation-tuned threshold.
+        """
         row, seen = build_feature_row(sender, subject, date, self.lookup)
-        probability = float(self.model.predict_proba(row)[0, 1])
+        score = float(self.model.predict_proba(row)[0, 1])
         features = {k: float(v) for k, v in row.iloc[0].items()}
-        return probability, probability >= self.threshold, seen, features
+        return score, score >= self.threshold, seen, features

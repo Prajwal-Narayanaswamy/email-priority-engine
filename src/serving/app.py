@@ -58,11 +58,11 @@ def health(request: Request) -> HealthOut:
 def predict(email: EmailIn, request: Request) -> PredictionOut:
     """Score one email with the reference model."""
     predictor = _predictor(request)
-    probability, flagged, seen, features = predictor.predict(
+    score, flagged, seen, features = predictor.predict(
         email.sender, email.subject, email.date
     )
     return PredictionOut(
-        probability=probability,
+        score=score,
         flagged=flagged,
         threshold=predictor.threshold,
         sender_seen_in_training=seen,
