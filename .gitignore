@@ -48,3 +48,6 @@ htmlcov/
 
 # Local execution logs
 *.log
+
+# Local Claude Code settings
+.claude/settings.local.json
