@@ -370,6 +370,59 @@ and label-rule baseline. This decision does not itself implement those stages.
   subject-length proxies (ADR-011), cross-sender subject overlap, and frequency
   computed using held-out emails remain as disclosed in ADR-012.
 
+### ADR-014: Serving contract and decisions (approved, partly implemented)
+**Context:** A minimal API exists (`GET /health`, `POST /predict`,
+`GET /model-info` in `src/serving/`). It serves the ADR-013 reference model
+and departs from the architecture diagram above:
+- The model is loaded by training run ID via a LoggedModel search, not from the
+  MLflow registry (no `register_model` exists in the code).
+- No prediction logging (ADR-006 SQLite), no `/metrics`, no `/predict/batch`,
+  no Docker image, no ONNX export.
+- The threshold is read from the evaluation run's `tuned_threshold` param, and
+  the `sender_frequency` lookup is an unversioned, untracked JSON file.
+- Earlier text calling behavioral-only "the production candidate" (ADR-010
+  and the line pointing to it) is left as history; ADR-010 is superseded by
+  ADR-013.
+
+**Decisions:**
+1. **Training-serving parity.** Serving reuses the `src/features/features.py`
+   functions for six of the seven features (confirmed in `build_feature_row`).
+   A parity test on real rows from `data/features/features.parquet` guards that
+   the serving path reproduces the stored offline features exactly.
+2. **Versioned sender_frequency lookup.** The lookup artifact embeds the
+   parquet sha256, row count and build date. Startup fails on a hash mismatch.
+   It is logged to a NEW MLflow run (`serving-artifacts`) carrying
+   `source_run_id`; it is never written to the finished training run.
+3. **Registry with alias.** The reference model is registered once as
+   `email-priority` with alias `champion`. This is documented as reference-only
+   per ADR-013; the future CI/CD stage promotes by moving the alias. The
+   registered version carries tags `tuned_threshold`, `threshold_source_run`,
+   `lookup_sha256`, `lookup_run_id`, `split_fingerprint` and `source_run_id`.
+   Serving loads `models:/email-priority@champion` through a `MODEL_URI`
+   environment variable, with NO automatic fallback to run-ID loading: a
+   missing alias fails startup.
+4. **Score, not probability.** The response field `probability` is renamed
+   `score` and documented as an uncalibrated score inflated by
+   `scale_pos_weight`. The caveats state that at the tuned threshold the flag
+   equals the leadership-only rule (ADR-013).
+5. **Fail loudly.** Startup fails if the model, threshold or lookup is missing
+   or the lookup hash mismatches. No degraded or partial serving mode.
+
+**Known limitations:**
+- Unseen senders default to `sender_frequency` 1, and a known sender's stored
+  count excludes the incoming email, whereas training counts included the email
+  itself. Serving is therefore off by one relative to training for new emails
+  from known senders. A seen-once sender and an unseen sender look identical.
+- A parity test on historical rows cannot detect this, because those rows are
+  already counted in the lookup.
+- `sender_frequency` was computed over all unique emails including held-out
+  ones (ADR-012), and the lookup is a static training snapshot.
+- The reference model still reproduces the leadership-only rule at the tuned
+  threshold (ADR-013); registry promotion does not make it a production model.
+
+**Out of scope for this pass:** Docker, `/predict/batch`, `/metrics`, SQLite
+prediction logging and ONNX. Each needs its own approval.
+
 ## Feature Hypotheses
 Every feature requires a hypothesis before implementation. Validate in EDA notebook.
 
