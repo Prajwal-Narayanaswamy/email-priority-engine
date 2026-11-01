@@ -10,32 +10,18 @@ import pytest
 from fastapi.testclient import TestClient
 
 from src.labels.labeling import LEADERSHIP_SENDERS
-from src.serving import config
-from src.serving import predictor as predictor_module
 from src.serving.app import app
 from src.serving.lookup import (
     UNSEEN_SENDER_FREQUENCY,
+    build_header,
     build_sender_lookup,
     load_sender_lookup,
     save_sender_lookup,
     sender_frequency_for,
 )
-from src.serving.predictor import (
-    CAVEATS,
-    Predictor,
-    build_feature_row,
-    load_model,
-    load_threshold,
-)
+from src.serving.predictor import CAVEATS, PREDICT_NOTE, Predictor, build_feature_row
 from src.training.train import BEHAVIORAL_FEATURES
-
-
-class StubModel:
-    """Returns a high score only when sender_is_leadership == 1."""
-
-    def predict_proba(self, frame: pd.DataFrame) -> np.ndarray:
-        p = frame["sender_is_leadership"].to_numpy(dtype=float) * 0.999
-        return np.column_stack([1 - p, p])
+from tests.serving_helpers import StubModel, make_metadata
 
 
 @pytest.fixture
@@ -45,7 +31,7 @@ def lookup() -> dict[str, int]:
 
 @pytest.fixture
 def client(lookup: dict[str, int]) -> Iterator[TestClient]:
-    app.state.predictor = Predictor(StubModel(), 0.99, lookup, "run", "eval")
+    app.state.predictor = Predictor(StubModel(), make_metadata(), lookup)
     with TestClient(app) as test_client:
         yield test_client
     app.state.predictor = None
@@ -61,7 +47,7 @@ def test_build_lookup_normalizes_and_roundtrips(tmp_path) -> None:
     built = build_sender_lookup(df)
     assert built == {"kenneth.lay@enron.com": 7, "x@y.com": 2}
     path = tmp_path / "l.json"
-    save_sender_lookup(built, path)
+    save_sender_lookup(built, path, build_header("b" * 64, 3))
     assert load_sender_lookup(path) == built
 
 
@@ -103,12 +89,22 @@ def test_feature_row_bad_date_and_nulls(lookup: dict[str, int]) -> None:
 
 
 def test_health_and_model_info(client: TestClient) -> None:
-    assert client.get("/health").json() == {"status": "ok", "model_run_id": "run"}
+    assert client.get("/health").json() == {
+        "status": "ok",
+        "model_run_id": "run",
+        "model_version": "3",
+    }
     info = client.get("/model-info").json()
     assert info["feature_columns"] == list(BEHAVIORAL_FEATURES)
     assert info["threshold"] == 0.99
     assert info["sender_lookup_size"] == 2
     assert "leadership" in info["caveats"]
+    assert info["model_name"] == "email-priority"
+    assert info["model_version"] == "3"
+    assert info["alias"] == "champion"
+    assert info["model_uri"] == "models:/email-priority/3"
+    assert info["threshold_source_run"] == "eval-run"
+    assert info["tags"] == make_metadata().tags
 
 
 def test_predict_unseen_sender_not_flagged(client: TestClient) -> None:
@@ -118,7 +114,8 @@ def test_predict_unseen_sender_not_flagged(client: TestClient) -> None:
     assert body["flagged"] is False
     assert body["sender_seen_in_training"] is False
     assert body["features"]["sender_frequency"] == UNSEEN_SENDER_FREQUENCY
-    assert "caveats" in body
+    assert body["note"] == PREDICT_NOTE
+    assert "caveats" not in body
 
 
 def test_predict_leadership_sender_flagged(client: TestClient) -> None:
@@ -154,95 +151,46 @@ def test_unseen_sender_gives_frequency_one(lookup: dict[str, int]) -> None:
 
 
 def test_caveat_wording(client: TestClient) -> None:
-    for text in (
-        CAVEATS,
-        client.get("/model-info").json()["caveats"],
-        client.post("/predict", json={"subject": "x"}).json()["caveats"],
-    ):
-        assert "uncalibrated" in text
-        assert "scale_pos_weight" in text
-        assert "not a probability" in text
-        assert "leadership-only rule" in text
-        assert "ADR-013" in text
+    text = client.get("/model-info").json()["caveats"]
+    assert text == CAVEATS
+    assert "ADR-013" in text and "ADR-005" in text
+    assert "not a genuine urgency predictor" in text
+    assert "uncalibrated" in text and "scale_pos_weight" in text
+    assert "not a probability" in text
+    # The test-split statement is scoped to that split and not a guarantee.
+    assert "On the held-out test split" in text
+    assert "60 of 60" in text and "non-leadership F1 0" in text
+    assert "not a guarantee" in text
+    assert "can score below the threshold" in text
+    # The old unscoped claim and internal run text are gone.
+    assert "flag equals" not in text
+    assert "with-keyword-features" not in text and "behavioral-only" not in text
 
 
-class _FailingClient:
-    """MlflowClient stand-in whose lookups find nothing or lack params."""
-
-    def __init__(self, *args: object, **kwargs: object) -> None:
-        pass
-
-    def get_experiment_by_name(self, name: str) -> None:
-        return None
-
-    def get_run(self, run_id: str) -> object:
-        class _Data:
-            params: dict[str, str] = {}
-
-        class _Run:
-            data = _Data()
-
-        return _Run()
+def test_predict_returns_only_a_one_line_note(client: TestClient) -> None:
+    body = client.post("/predict", json={"subject": "x"}).json()
+    assert (
+        body["note"] == PREDICT_NOTE == "Reference model; see /model-info for caveats."
+    )
+    assert "\n" not in body["note"]
+    assert CAVEATS not in str(body)
 
 
-def test_load_model_raises_when_experiment_missing(
-    monkeypatch: pytest.MonkeyPatch,
+def test_leadership_sender_can_score_below_threshold(
+    lookup: dict[str, int],
 ) -> None:
-    monkeypatch.setattr(predictor_module, "MlflowClient", _FailingClient)
-    monkeypatch.setattr(predictor_module.mlflow, "set_tracking_uri", lambda uri: None)
-    with pytest.raises(ValueError, match="not found"):
-        load_model("some-run")
+    """The stated limitation is real: nothing forces a leadership flag."""
 
+    class LowModel:
+        def predict_proba(self, frame: pd.DataFrame) -> np.ndarray:
+            return np.array([[0.4554, 0.5446]])
 
-def test_load_threshold_raises_when_param_missing(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(predictor_module, "MlflowClient", _FailingClient)
-    with pytest.raises(KeyError, match="tuned_threshold"):
-        load_threshold("some-eval-run")
-
-
-def _start_app() -> None:
-    app.state.predictor = None
-    with TestClient(app):
-        pass
-
-
-@pytest.fixture
-def clean_app_state() -> Iterator[None]:
-    app.state.predictor = None
-    yield
-    app.state.predictor = None
-
-
-def test_startup_fails_when_model_cannot_load(
-    monkeypatch: pytest.MonkeyPatch, clean_app_state: None
-) -> None:
-    def boom(run_id: str) -> object:
-        raise ValueError("no model")
-
-    monkeypatch.setattr("src.serving.app.load_model", boom)
-    with pytest.raises(ValueError, match="no model"):
-        _start_app()
-
-
-def test_startup_fails_when_threshold_missing(
-    monkeypatch: pytest.MonkeyPatch, clean_app_state: None
-) -> None:
-    monkeypatch.setattr("src.serving.app.load_model", lambda run_id: StubModel())
-    monkeypatch.setattr(predictor_module, "MlflowClient", _FailingClient)
-    with pytest.raises(KeyError, match="tuned_threshold"):
-        _start_app()
-
-
-def test_startup_fails_when_lookup_file_missing(
-    monkeypatch: pytest.MonkeyPatch, tmp_path, clean_app_state: None
-) -> None:
-    monkeypatch.setattr("src.serving.app.load_model", lambda run_id: StubModel())
-    monkeypatch.setattr("src.serving.app.load_threshold", lambda run_id: 0.99)
-    monkeypatch.setattr(config, "SENDER_LOOKUP_PATH", tmp_path / "missing.json")
-    with pytest.raises(FileNotFoundError):
-        _start_app()
+    predictor = Predictor(LowModel(), make_metadata(tuned_threshold="0.9943"), lookup)
+    score, flagged, _, features = predictor.predict(
+        "kenneth.lay@enron.com", "RE: budget?", None
+    )
+    assert features["sender_is_leadership"] == 1.0
+    assert score < predictor.threshold and flagged is False
 
 
 def test_503_when_model_missing() -> None:

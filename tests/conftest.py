@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+from collections.abc import Iterator
 from pathlib import Path
 from tarfile import TarFile, TarInfo
 
@@ -45,6 +46,15 @@ def build_archive(path: Path, emails: dict[str, bytes]) -> Path:
             info.size = len(raw)
             tar.addfile(info, io.BytesIO(raw))
     return path
+
+
+@pytest.fixture
+def mlflow_globals() -> Iterator[None]:
+    """Isolate MLflow's global URIs and the env vars that mirror them."""
+    from tests.serving_helpers import isolated_mlflow
+
+    with isolated_mlflow():
+        yield
 
 
 @pytest.fixture

@@ -7,18 +7,27 @@ CI (which has none of them) is unaffected.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from typing import Any
 
 import numpy as np
 import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
+from mlflow import MlflowClient
 
 from src.serving import config
 from src.serving.app import app
-from src.serving.lookup import load_sender_lookup
-from src.serving.predictor import Predictor, build_feature_row, load_model
+from src.serving.lookup import LookupFormatError, load_sender_lookup
+from src.serving.predictor import Predictor, build_feature_row
+from src.serving.registry import (
+    ServingMetadata,
+    ServingStartupError,
+    fetch_serving_metadata,
+    load_model,
+)
 from src.training.train import BEHAVIORAL_FEATURES
+from tests.serving_helpers import isolated_mlflow
 
 SEED = 42
 REQUEST_COLUMNS = ["from", "subject", "date"]
@@ -39,16 +48,29 @@ def real_lookup() -> dict[str, int]:
     """Load the real sender lookup file, or skip."""
     if not config.SENDER_LOOKUP_PATH.is_file():
         pytest.skip(f"{config.SENDER_LOOKUP_PATH} not available")
-    return load_sender_lookup(config.SENDER_LOOKUP_PATH)
+    try:
+        return load_sender_lookup(config.SENDER_LOOKUP_PATH)
+    except LookupFormatError as exc:
+        pytest.skip(
+            f"lookup file is stale or malformed ({exc}); rebuild it with "
+            "`python -m src.serving.build_lookup`"
+        )
 
 
 @pytest.fixture(scope="module")
-def reference_model() -> Any:
-    """Load the reference model from MLflow, or skip."""
-    try:
-        return load_model(config.MODEL_RUN_ID)
-    except Exception as exc:  # noqa: BLE001 - any load failure means unavailable
-        pytest.skip(f"reference model unavailable: {exc}")
+def registered() -> Iterator[tuple[Any, ServingMetadata]]:
+    """Resolve MODEL_URI and load the model, or skip if not registered yet."""
+    with isolated_mlflow():
+        try:
+            client = MlflowClient(tracking_uri=config.TRACKING_URI)
+            metadata = fetch_serving_metadata(config.MODEL_URI, client)
+            model = load_model(metadata, config.TRACKING_URI)
+        except ServingStartupError as exc:
+            pytest.skip(
+                f"{config.MODEL_URI} is not registered or not loadable ({exc}); "
+                "run scripts.register_reference_model --apply first"
+            )
+        yield model, metadata
 
 
 def _none_if_nan(value: Any) -> Any:
@@ -77,13 +99,14 @@ def test_real_rows_features_match_stored_exactly(
 
 
 def test_api_score_equals_model_predict_proba(
-    real_rows: pd.DataFrame, real_lookup: dict[str, int], reference_model: Any
+    real_rows: pd.DataFrame,
+    real_lookup: dict[str, int],
+    registered: tuple[Any, ServingMetadata],
 ) -> None:
+    reference_model, metadata = registered
     sample = real_rows.sample(200, random_state=SEED)
     expected = reference_model.predict_proba(sample[list(BEHAVIORAL_FEATURES)])[:, 1]
-    app.state.predictor = Predictor(
-        reference_model, 0.5, real_lookup, config.MODEL_RUN_ID, "local-parity"
-    )
+    app.state.predictor = Predictor(reference_model, metadata, real_lookup)
     try:
         with TestClient(app) as client:
             scores = [

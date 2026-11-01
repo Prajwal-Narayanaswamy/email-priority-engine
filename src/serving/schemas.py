@@ -31,7 +31,8 @@ class PredictionOut(BaseModel):
     sender_seen_in_training: bool
     features: dict[str, float]
     model_run_id: str
-    caveats: str
+    model_version: str
+    note: str = Field(description="One-line pointer; full caveats are in /model-info")
 
 
 class HealthOut(BaseModel):
@@ -39,14 +40,21 @@ class HealthOut(BaseModel):
 
     status: str
     model_run_id: str
+    model_version: str
 
 
 class ModelInfoOut(BaseModel):
     """Description of the loaded reference model and its limitations."""
 
+    model_name: str
+    model_version: str
+    alias: str | None
+    model_uri: str
     model_run_id: str
-    eval_run_id: str
     threshold: float
+    threshold_source_run: str
+    lookup_sha256: str
+    tags: dict[str, str]
     feature_columns: list[str]
     sender_lookup_size: int
     caveats: str

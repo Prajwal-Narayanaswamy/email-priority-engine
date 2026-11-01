@@ -5,10 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-import mlflow
-import mlflow.sklearn  # noqa: F401  (registers mlflow.sklearn.load_model)
 import pandas as pd
-from mlflow import MlflowClient
 
 from src.features.features import (
     feature_day_of_week,
@@ -18,53 +15,29 @@ from src.features.features import (
     feature_subject_length,
     feature_thread_depth,
 )
-from src.serving import config
 from src.serving.lookup import sender_frequency_for
-from src.training.train import BEHAVIORAL_FEATURES, LIMITATION_NOTE
+from src.serving.registry import ServingMetadata
+from src.training.train import BEHAVIORAL_FEATURES
 
 logger = logging.getLogger(__name__)
 
 CAVEATS: str = (
-    "Reference model (ADR-013). Labels are heuristic (ADR-005). The score is "
-    "uncalibrated and inflated by scale_pos_weight; it is not a probability. "
-    "At the tuned threshold the flag equals the leadership-only rule "
-    "(ADR-013: test F1 ~0.42; non-leadership F1 0). Not a genuine urgency "
-    "predictor. " + LIMITATION_NOTE
+    "Reference model per ADR-013; not a genuine urgency predictor. "
+    "Labels are heuristic (ADR-005). "
+    "The score is uncalibrated and inflated by scale_pos_weight; it is not a "
+    "probability. "
+    "On the held-out test split, the flagged rows were exactly the "
+    "leadership-sender rows (60 of 60; test F1 about 0.42, the same as the "
+    "leadership-only rule; non-leadership F1 0). That is an empirical property "
+    "of that split, not a guarantee: a leadership sender's email can score "
+    "below the threshold."
 )
+PREDICT_NOTE: str = "Reference model; see /model-info for caveats."
 SENDER_FREQUENCY_NOTE: str = (
     "sender_frequency is a snapshot of training-data counts and does not "
     "update with new emails. Unseen senders are assigned 1 (the lowest value "
     "seen in training); null/empty senders get 0."
 )
-
-
-def load_model(run_id: str) -> Any:
-    """Load the single logged 'model' LoggedModel of a training run."""
-    mlflow.set_tracking_uri(config.TRACKING_URI)
-    client = MlflowClient(tracking_uri=config.TRACKING_URI)
-    experiment = client.get_experiment_by_name(config.EXPERIMENT_NAME)
-    if experiment is None:
-        raise ValueError(f"experiment {config.EXPERIMENT_NAME!r} not found")
-    candidates = [
-        m
-        for m in client.search_logged_models(
-            experiment_ids=[experiment.experiment_id],
-            filter_string=f"source_run_id = '{run_id}'",
-        )
-        if m.name == "model"
-    ]
-    if len(candidates) != 1:
-        raise ValueError(
-            f"expected one 'model' for run {run_id}, got {len(candidates)}"
-        )
-    logger.info("Loading model %s from run %s", candidates[0].model_id, run_id)
-    return mlflow.sklearn.load_model(f"models:/{candidates[0].model_id}")
-
-
-def load_threshold(eval_run_id: str) -> float:
-    """Read the validation-selected threshold logged by the evaluation run."""
-    client = MlflowClient(tracking_uri=config.TRACKING_URI)
-    return float(client.get_run(eval_run_id).data.params["tuned_threshold"])
 
 
 def build_feature_row(
@@ -93,16 +66,27 @@ class Predictor:
     def __init__(
         self,
         model: Any,
-        threshold: float,
+        metadata: ServingMetadata,
         lookup: dict[str, int],
-        model_run_id: str,
-        eval_run_id: str,
     ) -> None:
         self.model = model
-        self.threshold = threshold
+        self.metadata = metadata
         self.lookup = lookup
-        self.model_run_id = model_run_id
-        self.eval_run_id = eval_run_id
+
+    @property
+    def threshold(self) -> float:
+        """Validation-tuned threshold read from the registered version's tags."""
+        return self.metadata.threshold
+
+    @property
+    def model_run_id(self) -> str:
+        """Training run that produced the served model (provenance)."""
+        return self.metadata.tags["source_run_id"]
+
+    @property
+    def model_version(self) -> str:
+        """Registry version number being served."""
+        return self.metadata.version
 
     def predict(
         self, sender: str | None, subject: str | None, date: str | None
