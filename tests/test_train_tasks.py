@@ -117,7 +117,6 @@ def test_train_variant_task_uses_local_tracking_uri(
 
     tracking_uri = mock_mlflow.set_tracking_uri.call_args[0][0]
     assert tracking_uri == TRACKING_URI
-    assert tracking_uri.startswith("sqlite:///")
     mock_mlflow.set_experiment.assert_called_once_with(EXPERIMENT_NAME)
 
 
@@ -134,8 +133,13 @@ def test_tracking_uri_reads_environment_override(
     assert train_tasks.TRACKING_URI == train_tasks._DEFAULT_URI
 
 
-def test_tracking_uri_default_is_absolute_sqlite_anchored_to_repo() -> None:
-    """Fix 1: the default must not depend on the process CWD."""
+def test_tracking_uri_default_is_absolute_sqlite_anchored_to_repo(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fix 1: the default must not depend on the process CWD or the ambient env."""
+    monkeypatch.delenv("MLFLOW_TRACKING_URI", raising=False)
+    importlib.reload(train_tasks)
+    assert train_tasks.TRACKING_URI == train_tasks._DEFAULT_URI
     assert train_tasks.TRACKING_URI.startswith("sqlite:////")
     assert train_tasks._REPO_ROOT == Path(__file__).resolve().parents[1]
     assert train_tasks._DEFAULT_URI == (

@@ -117,9 +117,12 @@ def test_evaluate_flow_returns_all_summaries(
     assert result["evaluation"]["run_id"] == "eval-run-id"
 
 
-def test_cli_requires_run_id() -> None:
+def test_cli_requires_run_id(tmp_path: Path) -> None:
+    """The input file must exist (click validates it), so use a real one."""
+    features = tmp_path / "features.parquet"
+    features.touch()
     runner = CliRunner()
-    result = runner.invoke(main, ["--input", "data/features/features.parquet"])
+    result = runner.invoke(main, ["--input", str(features)])
     assert result.exit_code == 2
     assert "--run-id" in result.output
 
