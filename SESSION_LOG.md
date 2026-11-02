@@ -7,6 +7,51 @@ Be specific. "Worked on features" is useless. "Ran feature_flow.py, got KeyError
 sender column, traced to ingest output missing sender_email field" is useful.
 ---
 
+### Session: 2026-11-01 (Docs commits, Step D1: model bundle and MODEL_SOURCE; ADR-015)
+**Stage:** Docs committed (88e2b08, e3d6f03, 0554ad7). D1 verified by the user: full
+suite 380 passed (420s), bundle exported with mlflow.db unchanged, served from the
+bundle (Lay 0.5446273611788119, no-date -1/-1), corrupted bundle exits 3. The user's
+fresh-clone check found `pip install uv` fails on Ubuntu 24.04 (PEP 668); README Setup
+now uses `python3 -m venv` (0554ad7, commands not verified end to end). D1 committed
+afterwards. Docker files not touched. Not pushed.
+
+**What I completed:**
+- Committed ARCHITECTURE.md/SESSION_LOG.md (88e2b08) and README (e3d6f03: Setup,
+  Reproducibility with versions from the model's requirements.txt, public-corpus
+  sentence). Verified: `--source-run-id`/`--eval-run-id` exist; an omitted `date`
+  field gives hour_of_day/day_of_week -1 (new test).
+- `BEHAVIORAL_FEATURES` moved to `src/features/columns.py`; `ServingMetadata`,
+  `ServingStartupError`, `parse_threshold` to mlflow-free `src/serving/metadata.py`.
+  Subprocess test: importing the serving app imports no mlflow, matplotlib,
+  `src.training.train`, prefect or evidently.
+- `src/serving/bundle.py` (write, manifest/metadata verification, skops loading with
+  the MLmodel's trusted types), `scripts/export_model_bundle.py`, `MODEL_SOURCE`
+  (`registry`|`bundle`, no default, no fallback) in `build_predictor`, `serving`
+  extra and explicit `skops` in pyproject, `serving_bundle*/` gitignored.
+- Tests: tests/test_bundle.py (round trip, 13 failure modes, MODEL_SOURCE, import
+  exclusion, bundle-vs-mlflow parity on the 300-row fixture), export tests in
+  test_registration.py (DB sha256 unchanged by export), tests/test_bundle_parity_local.py
+  (real model: 300 fixture rows + 2,000 real rows, atol 1e-12).
+- Agent-run checks: black/ruff/isort clean; test_bundle, test_registry, test_serving,
+  test_serving_parity, test_registration, both local parity files: all passed, none
+  skipped. Real export to a scratch dir; API served from it with MLFLOW_TRACKING_URI
+  unset: Lay score 0.5446273611788119 (diff 0.0 vs the registry value), mlflow not
+  imported; one flipped byte in model.skops and an unset MODEL_SOURCE both exit 3
+  with the specific message. Real mlflow.db sha256 8ce61c5fea99fe5c... and size
+  1228800 unchanged before and after.
+- ADR-015 written.
+
+**Open:** full suite not run by me (user's terminal). The scratch bundle at
+scratchpad/real_bundle contains the real lookup (real addresses): local only, delete.
+ADR-014's title still says "registration not yet applied" (stale; left as is).
+
+**Next session — first thing to do:**
+> Run the full suite, then export the bundle (`python -m scripts.export_model_bundle`).
+> On approval: D2 = hashed lock, Dockerfile, .dockerignore, api-only compose, healthcheck,
+> CI docker job, image verification.
+
+---
+
 ### Session: 2026-11-01 (Code commit 8f02eb1, README rework, Docker-stage audit)
 **Stage:** Serving code committed; docs (ARCHITECTURE.md, README.md, this log) UNCOMMITTED
 pending review; Docker stage planned, nothing built. Nothing pushed.

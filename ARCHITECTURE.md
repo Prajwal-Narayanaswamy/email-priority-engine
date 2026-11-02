@@ -370,7 +370,7 @@ and label-rule baseline. This decision does not itself implement those stages.
   subject-length proxies (ADR-011), cross-sender subject overlap, and frequency
   computed using held-out emails remain as disclosed in ADR-012.
 
-### ADR-014: Serving contract and decisions (approved; parity and score rename implemented, registry and lookup v2 code written, registration not yet applied)
+### ADR-014: Serving contract and decisions (approved and implemented; registered as `email-priority` version 1 with alias `champion`)
 **Context:** A minimal API exists (`GET /health`, `POST /predict`,
 `GET /model-info` in `src/serving/`). It serves the ADR-013 reference model
 and departs from the architecture diagram above:
@@ -453,6 +453,82 @@ and departs from the architecture diagram above:
 
 **Out of scope for this pass:** Docker, `/predict/batch`, `/metrics`, SQLite
 prediction logging and ONNX. Each needs its own approval.
+
+### ADR-015: Serving image and model bundle (approved; D1 bundle code implemented, Dockerfile and compose not yet rewritten)
+**Context:** The existing `docker/api/Dockerfile` and `docker-compose.yml` predate
+the serving code: the `CMD` names a module that does not exist
+(`src.serving.main:app`), `HEALTHCHECK` uses `curl` (absent in
+`python:3.12-slim`), `pip install -e .` runs before the source is copied and
+installs the whole project dependency list, there is no `.dockerignore` and no
+non-root user, and the compose file pins an MLflow 2.x server against the
+project's 3.15.1 store and wires monitoring services that have nothing to scrape.
+ADR-014 also recorded that registered versions point at absolute WSL artifact
+paths, so a container cannot load them from the registry as-is.
+
+**Decisions:**
+1. **Model bundle.** `scripts/export_model_bundle.py` resolves
+   `email-priority@champion` (read-only against the registry) and writes a
+   directory (default `./serving_bundle`, gitignored): `model/MLmodel`,
+   `model/model.skops`, `sender_frequency.json`, `metadata.json` (model name,
+   version, alias, threshold, all tags, sha256 of every payload file, library
+   versions of the exporting environment, the model's own `requirements.txt`,
+   export time) and `manifest.json` (sha256 of all four files). Export refuses if
+   the lookup's sha256 differs from the registered `lookup_sha256` tag, and
+   refuses to overwrite an existing bundle without `--force`.
+2. **Verification, no fallback.** `MODEL_SOURCE` is `registry` or `bundle`, with
+   no default; unset or unknown fails startup, and a failing source never falls
+   back to the other. The bundle loader verifies that the manifest lists exactly
+   the four files and that every hash matches, that `metadata.json` agrees with
+   the manifest, that the tags are complete and the threshold valid (same checks
+   as the registry source), and the app re-checks the lookup hash against the
+   `lookup_sha256` tag. Both sources return the same `ServingMetadata`. The
+   manifest detects corruption and accidental edits; it is not a signature, so
+   whoever can rewrite the bundle can rewrite the manifest too.
+3. **mlflow is dropped from the image.** In bundle mode the model is loaded with
+   `skops.io.load`, trusting exactly the types in the bundle's `MLmodel`
+   (`skops_trusted_types`), which is the call `mlflow.sklearn.load_model` makes.
+   The condition was a parity test: the same bundle loaded both ways must give
+   identical `predict_proba` (rtol 0, atol 1e-12). It holds on the 300-row
+   fixture and on 2,000 real rows for the real model (local-only test), and a
+   served Lay request returns the same score, 0.5446273611788119, as registry
+   mode. A subprocess test asserts that importing the serving app imports neither
+   mlflow, matplotlib, `src.training.train`, prefect nor evidently.
+   `BEHAVIORAL_FEATURES` moved to `src/features/columns.py` (training re-exports
+   it) so serving does not import the training module. Registry mode keeps
+   mlflow and stays the local-development path.
+4. **The image is generic.** It contains code and pinned dependencies only; the
+   bundle is mounted read-only at run time (`MODEL_BUNDLE_DIR`). Alternative
+   rejected: baking the model into the image. CI cannot reach the registry or
+   the artifacts (they are local and gitignored), so a baked image could not be
+   built or tested there, and every model change would force a rebuild.
+5. **Dependencies.** `pyproject.toml` declares `skops` (previously only a
+   transitive pin of full mlflow) and a `serving` extra with only the API's
+   runtime needs. The image installs a hashed lock compiled from that extra, with
+   versions matching the model's own `requirements.txt` (lightgbm 4.7.0, numpy
+   2.5.2, pandas 2.3.3, scikit-learn 1.9.0, scipy 1.18.0, skops 0.14.0) and a
+   pinned base image tag. The existing project dependencies are floors with no
+   lock and are unchanged.
+6. **Container hygiene.** Non-root user, `PYTHONUNBUFFERED`,
+   `PYTHONDONTWRITEBYTECODE`, a strict `.dockerignore` (`.venv`, `data`, `mlruns`,
+   `.git`, `.env`, logs, bundles), and a stdlib `HEALTHCHECK` (`urllib.request`
+   against `/health`; startup blocks until the model loads, so a passing check
+   means the model is ready).
+7. **Compose scope: the `api` service only,** with the bundle mounted read-only,
+   `MODEL_SOURCE=bundle`, a read-only root filesystem and a tmpfs for `/tmp`.
+
+**Out of scope:** MLflow server, Prometheus and Grafana services, `/metrics`,
+prediction logging, `/predict/batch`, ONNX, and registry mode inside the
+container.
+
+**Known limitations:**
+- A bundle is a snapshot of one version: rolling back means re-exporting a
+  different version, and nothing in the container follows later alias moves.
+- The bundle contains the 20,312-sender lookup (real Enron addresses), so
+  bundles and any image or volume holding one stay local and private.
+- Library versions are pinned to what the model was logged with; the bundle
+  loader does not yet compare runtime versions with the recorded ones.
+- Dockerfile, compose, lock file and the CI docker job are still the old,
+  broken versions until step D2.
 
 ## Feature Hypotheses
 Every feature requires a hypothesis before implementation. Validate in EDA notebook.
