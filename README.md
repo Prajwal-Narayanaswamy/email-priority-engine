@@ -63,14 +63,20 @@ baseline/CI evaluation: `559ccf6356494eecabb332c47eff2105`.
 
 ## Setup
 
-Python 3.12 and [uv](https://github.com/astral-sh/uv):
+Python 3.12 in a virtual environment, which leaves the system Python alone
+(stock Ubuntu 24.04 refuses `pip install` outside a venv, PEP 668):
 
 ```bash
-pip install uv
-uv venv .venv --python 3.12
+sudo apt install python3-venv   # only if the next line reports ensurepip is missing
+python3 -m venv .venv
 source .venv/bin/activate
-uv pip install -e ".[dev]"
+pip install -e ".[dev]"
 ```
+
+[uv](https://github.com/astral-sh/uv) is an optional, faster alternative
+(`uv venv` then `uv pip install -e ".[dev]"`). Install it with `pipx install uv`
+or astral's installer, not `pip install uv`. These commands have not been
+verified end to end on a clean machine.
 
 ### Reproducibility
 
