@@ -4,13 +4,14 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pandas as pd
 import pytest
 
-from src.serving.registry import REQUIRED_TAGS, ServingMetadata
+from src.serving.metadata import REQUIRED_TAGS, ServingMetadata
 
 LOOKUP_SHA = "a" * 64
 _MLFLOW_ENV_VARS = (
@@ -40,6 +41,53 @@ def isolated_mlflow() -> Iterator[None]:
             yield
         finally:
             tracking_utils._tracking_uri, registry_utils._registry_uri = saved
+
+
+def make_synthetic_bundle(root: Path) -> tuple[Path, ServingMetadata]:
+    """Write a real (tiny LightGBM) skops model plus lookup as a bundle directory."""
+    import skops.io
+    import yaml
+    from lightgbm import LGBMClassifier
+    from sklearn import __version__ as sklearn_version
+
+    from src.features.columns import BEHAVIORAL_FEATURES
+    from src.serving.bundle import write_bundle
+    from src.serving.lookup import build_header, save_sender_lookup
+
+    rng = np.random.default_rng(0)
+    x = pd.DataFrame(
+        rng.integers(0, 50, (200, len(BEHAVIORAL_FEATURES))),
+        columns=list(BEHAVIORAL_FEATURES),
+    )
+    y = (x.iloc[:, 0] + rng.integers(0, 30, 200) > 40).astype(int)
+    model = LGBMClassifier(n_estimators=5, min_child_samples=5, verbose=-1).fit(x, y)
+    parts = root / "parts"
+    parts.mkdir(parents=True)
+    skops.io.dump(model, parts / "model.skops")
+    flavor = {
+        "pickled_model": "model.skops",
+        "serialization_format": "skops",
+        "sklearn_version": sklearn_version,
+        "skops_trusted_types": skops.io.get_untrusted_types(file=parts / "model.skops"),
+    }
+    (parts / "MLmodel").write_text(
+        yaml.safe_dump({"flavors": {"sklearn": flavor}}), encoding="utf-8"
+    )
+    digest = save_sender_lookup(
+        {"a@b.com": 3}, parts / "lookup.json", build_header("b" * 64, 10)
+    )
+    metadata = make_metadata(lookup_sha256=digest)
+    bundle_dir = root / "bundle"
+    write_bundle(
+        bundle_dir,
+        metadata,
+        parts / "MLmodel",
+        parts / "model.skops",
+        parts / "lookup.json",
+        {"python": "3.12"},
+        ["lightgbm==4.7.0"],
+    )
+    return bundle_dir, metadata
 
 
 class StubModel:

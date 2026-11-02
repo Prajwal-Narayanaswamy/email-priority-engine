@@ -20,9 +20,10 @@ from fastapi.testclient import TestClient
 from mlflow import MlflowClient
 from sklearn.linear_model import LogisticRegression
 
+from scripts.export_model_bundle import export_bundle
 from scripts.log_lookup_run import main as log_lookup_main
 from scripts.register_reference_model import main as register_main
-from src.serving import config
+from src.serving import bundle, config
 from src.serving import registration as registration_module
 from src.serving.app import app, build_predictor
 from src.serving.lookup import (
@@ -31,6 +32,7 @@ from src.serving.lookup import (
     file_sha256,
     save_sender_lookup,
 )
+from src.serving.metadata import REQUIRED_TAGS, ServingStartupError
 from src.serving.registration import (
     PrecheckError,
     apply_plan,
@@ -39,7 +41,6 @@ from src.serving.registration import (
 )
 from src.serving.registry import (
     CHAMPION_ALIAS,
-    REQUIRED_TAGS,
     fetch_serving_metadata,
     load_model,
 )
@@ -306,6 +307,7 @@ def test_serving_startup_configures_mlflow_itself(
     apply_plan(env.client, build_plan(env.client, **env.plan_kwargs()))
     monkeypatch.setattr(config, "SENDER_LOOKUP_PATH", env.lookup_path)
     monkeypatch.setattr(config, "MODEL_URI", "models:/email-priority@champion")
+    monkeypatch.setattr(config, "MODEL_SOURCE", "registry")
     _poison_global_mlflow(env, tmp_path, monkeypatch)
     app.state.predictor = None
     try:
@@ -366,3 +368,63 @@ def test_register_cli_refuses_rerun_against_existing_registration(
         assert "alias 'champion' already points to version 1" in again.output
     versions = env.client.search_model_versions("name='email-priority'")
     assert [str(v.version) for v in versions] == ["1"]
+
+
+# ---- bundle export (read-only against the registry)
+
+
+def _registered_env(make_env: Callable[..., Env]) -> Env:
+    env = make_env()
+    env.log_lookup()
+    apply_plan(env.client, build_plan(env.client, **env.plan_kwargs()))
+    return env
+
+
+def test_export_bundle_is_read_only_and_matches_registry_model(
+    make_env: Callable[..., Env], tmp_path: Path
+) -> None:
+    env = _registered_env(make_env)
+    db = tmp_path / "mlflow.db"
+    before = file_sha256(db)
+    out = tmp_path / "bundle_out"
+    metadata = export_bundle(
+        env.client, "models:/email-priority@champion", out, env.lookup_path, False
+    )
+    assert file_sha256(db) == before, "export must not write to the registry DB"
+    assert bundle.load_bundle_metadata(out) == metadata
+    x = np.array([[0.0], [1.0], [2.0], [3.0]])
+    np.testing.assert_allclose(
+        bundle.load_bundle_model(out).predict_proba(x),
+        load_model(metadata, env.uri).predict_proba(x),
+        rtol=0,
+        atol=1e-12,
+    )
+
+
+def test_export_refuses_lookup_that_differs_from_the_tag(
+    make_env: Callable[..., Env], tmp_path: Path
+) -> None:
+    env = _registered_env(make_env)
+    other = tmp_path / "other_lookup.json"
+    save_sender_lookup({"x@y.com": 1}, other, build_header("c" * 64, 1))
+    out = tmp_path / "bundle_out"
+    with pytest.raises(ServingStartupError, match="differs from the registered"):
+        export_bundle(env.client, "models:/email-priority@champion", out, other, False)
+    assert not out.exists() and not out.with_name("bundle_out.partial").exists()
+
+
+def test_export_refuses_to_overwrite_without_force(
+    make_env: Callable[..., Env], tmp_path: Path
+) -> None:
+    env = _registered_env(make_env)
+    out = tmp_path / "bundle_out"
+    args = (env.client, "models:/email-priority@champion", out, env.lookup_path)
+    export_bundle(*args, False)
+    marker = out / "marker.txt"
+    marker.write_text("keep")
+    with pytest.raises(FileExistsError, match="--force"):
+        export_bundle(*args, False)
+    assert marker.exists()
+    export_bundle(*args, True)
+    assert not marker.exists()
+    bundle.load_bundle_metadata(out)

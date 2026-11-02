@@ -5,56 +5,87 @@ from __future__ import annotations
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
+from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
-from mlflow import MlflowClient
 
-from src.serving import config
+from src.features.columns import BEHAVIORAL_FEATURES
+from src.serving import bundle, config
 from src.serving.lookup import load_lookup
+from src.serving.metadata import ServingMetadata, ServingStartupError
 from src.serving.predictor import (
     CAVEATS,
     PREDICT_NOTE,
     SENDER_FREQUENCY_NOTE,
     Predictor,
 )
-from src.serving.registry import (
-    ServingStartupError,
-    configure_mlflow,
-    fetch_serving_metadata,
-    load_model,
-)
 from src.serving.schemas import EmailIn, HealthOut, ModelInfoOut, PredictionOut
-from src.training.train import BEHAVIORAL_FEATURES
 
 logger = logging.getLogger(__name__)
 
+MODEL_SOURCES: tuple[str, ...] = ("registry", "bundle")
 
-def build_predictor() -> Predictor:
-    """Resolve MODEL_URI, verify the lookup against its tag and load the model.
 
-    Raises:
-        ServingStartupError: on any registry, tag, threshold or lookup mismatch.
-        FileNotFoundError: if the lookup file is missing.
-        LookupFormatError: if the lookup has no or a malformed header.
-    """
-    configure_mlflow(config.TRACKING_URI)
-    client = MlflowClient(tracking_uri=config.TRACKING_URI)
-    metadata = fetch_serving_metadata(config.MODEL_URI, client)
-    lookup_file = load_lookup(config.SENDER_LOOKUP_PATH)
+def _check_lookup(metadata: ServingMetadata, path: Path) -> dict[str, int]:
+    """Load the lookup and require its file sha256 to equal the metadata's tag."""
+    lookup_file = load_lookup(path)
     if lookup_file.file_sha256 != metadata.lookup_sha256:
         raise ServingStartupError(
             f"lookup file sha256 {lookup_file.file_sha256} does not match the "
             f"registered lookup_sha256 tag {metadata.lookup_sha256}; rebuild or "
             "re-register"
         )
-    model = load_model(metadata, config.TRACKING_URI)
+    return lookup_file.senders
+
+
+def _from_registry() -> tuple[ServingMetadata, dict[str, int], Any]:
+    # Imported here so a bundle-only image does not need mlflow.
+    from src.serving import registry
+
+    registry.configure_mlflow(config.TRACKING_URI)
+    client = registry.MlflowClient(tracking_uri=config.TRACKING_URI)
+    metadata = registry.fetch_serving_metadata(config.MODEL_URI, client)
+    lookup = _check_lookup(metadata, config.SENDER_LOOKUP_PATH)
+    return metadata, lookup, registry.load_model(metadata, config.TRACKING_URI)
+
+
+def _from_bundle() -> tuple[ServingMetadata, dict[str, int], Any]:
+    metadata = bundle.load_bundle_metadata(config.BUNDLE_DIR)
+    lookup = _check_lookup(metadata, config.BUNDLE_DIR / bundle.LOOKUP_FILE)
+    return metadata, lookup, bundle.load_bundle_model(config.BUNDLE_DIR)
+
+
+def build_predictor() -> Predictor:
+    """Load model, metadata and lookup from the explicit MODEL_SOURCE.
+
+    There is no default and no fallback: an unset or unknown MODEL_SOURCE, or
+    any failure in the chosen source, stops startup.
+
+    Raises:
+        ServingStartupError: on a bad MODEL_SOURCE or any registry, bundle, tag,
+            threshold or lookup-hash problem.
+        FileNotFoundError: if the lookup file is missing.
+        LookupFormatError: if the lookup has no or a malformed header.
+    """
+    source = config.MODEL_SOURCE
+    if source == "registry":
+        metadata, lookup, model = _from_registry()
+    elif source == "bundle":
+        metadata, lookup, model = _from_bundle()
+    else:
+        raise ServingStartupError(
+            f"MODEL_SOURCE must be one of {list(MODEL_SOURCES)} "
+            f"(got {source!r}); there is no default and no fallback"
+        )
     logger.info(
-        "Serving %s version %s (threshold %s)",
+        "Serving %s version %s from %s (threshold %s)",
         metadata.model_name,
         metadata.version,
+        source,
         metadata.threshold,
     )
-    return Predictor(model, metadata, lookup_file.senders)
+    return Predictor(model, metadata, lookup)
 
 
 @asynccontextmanager

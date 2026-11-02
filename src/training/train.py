@@ -28,6 +28,7 @@ from sklearn.metrics import (
 )
 from sklearn.model_selection import train_test_split
 
+from src.features.columns import BEHAVIORAL_FEATURES
 from src.features.features import FEATURE_COLUMNS, transform_subjects
 
 matplotlib.use("Agg")
@@ -54,11 +55,6 @@ LIMITATION_NOTE: str = (
     "drops urgency_keyword_count and subject TF-IDF. Second known limitation: "
     "sender_frequency is computed on the full dataset including the test "
     "split (minor leakage, accepted for v1)."
-)
-
-#: Tabular features that do not encode the ADR-005 label rule.
-BEHAVIORAL_FEATURES: tuple[str, ...] = tuple(
-    c for c in FEATURE_COLUMNS if c != "urgency_keyword_count"
 )
 
 

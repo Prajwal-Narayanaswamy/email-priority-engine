@@ -22,6 +22,9 @@ models/
 mlruns/
 mlartifacts/
 
+# Exported serving bundles (contain real sender addresses; ADR-015)
+serving_bundle*/
+
 # Notebooks output
 notebooks/.ipynb_checkpoints/
 

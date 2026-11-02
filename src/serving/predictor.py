@@ -7,6 +7,7 @@ from typing import Any
 
 import pandas as pd
 
+from src.features.columns import BEHAVIORAL_FEATURES
 from src.features.features import (
     feature_day_of_week,
     feature_has_question_mark,
@@ -16,8 +17,7 @@ from src.features.features import (
     feature_thread_depth,
 )
 from src.serving.lookup import sender_frequency_for
-from src.serving.registry import ServingMetadata
-from src.training.train import BEHAVIORAL_FEATURES
+from src.serving.metadata import ServingMetadata
 
 logger = logging.getLogger(__name__)
 

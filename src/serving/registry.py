@@ -1,16 +1,15 @@
 """Registry access for serving: resolve MODEL_URI once, read tags, load the model.
 
 Metadata retrieval is isolated in `fetch_serving_metadata`, which returns a
-`ServingMetadata`, so another source (for example a bundle baked into a Docker
-image) can be added later without touching the app.
+`ServingMetadata`; the bundle source (src/serving/bundle.py) returns the same
+type. The dataclass and its helpers live in src/serving/metadata.py so the
+bundle path does not import mlflow.
 """
 
 from __future__ import annotations
 
 import logging
-import math
 import re
-from dataclasses import dataclass
 from typing import Any
 
 import mlflow
@@ -19,6 +18,13 @@ from mlflow import MlflowClient
 from mlflow.exceptions import MlflowException
 from mlflow.protos.databricks_pb2 import RESOURCE_DOES_NOT_EXIST, ErrorCode
 
+from src.serving.metadata import (
+    ServingMetadata,
+    ServingStartupError,
+    check_required_tags,
+    parse_threshold,
+)
+
 logger = logging.getLogger(__name__)
 
 REGISTERED_MODEL_NAME: str = "email-priority"
@@ -26,37 +32,8 @@ CHAMPION_ALIAS: str = "champion"
 #: ADR-013 reference: behavioral-only training run and its evaluation run.
 REFERENCE_SOURCE_RUN_ID: str = "7189707b198f47748f89965712eee4bc"
 REFERENCE_EVAL_RUN_ID: str = "559ccf6356494eecabb332c47eff2105"
-REQUIRED_TAGS: tuple[str, ...] = (
-    "tuned_threshold",
-    "threshold_source_run",
-    "lookup_sha256",
-    "lookup_run_id",
-    "split_fingerprint",
-    "source_run_id",
-)
 _ALIAS_URI = re.compile(r"^models:/([^/@]+)@([^/@]+)$")
 _VERSION_URI = re.compile(r"^models:/([^/@]+)/(\d+)$")
-
-
-class ServingStartupError(RuntimeError):
-    """Raised at startup when the registry state cannot support serving."""
-
-
-@dataclass(frozen=True)
-class ServingMetadata:
-    """Everything serving needs to know about the model version it loads."""
-
-    model_name: str
-    version: str
-    alias: str | None
-    threshold: float
-    lookup_sha256: str
-    tags: dict[str, str]
-
-    @property
-    def model_uri(self) -> str:
-        """Immutable URI of the resolved version (never the alias)."""
-        return f"models:/{self.model_name}/{self.version}"
 
 
 def parse_model_uri(model_uri: str) -> tuple[str, str | None, str | None]:
@@ -79,25 +56,6 @@ def parse_model_uri(model_uri: str) -> tuple[str, str | None, str | None]:
 
 def _is_missing(exc: MlflowException) -> bool:
     return exc.error_code == ErrorCode.Name(RESOURCE_DOES_NOT_EXIST)
-
-
-def parse_threshold(raw: str) -> float:
-    """Parse the tuned_threshold tag; it must be finite and inside (0, 1).
-
-    Raises:
-        ServingStartupError: if non-numeric or out of range.
-    """
-    try:
-        value = float(raw)
-    except (TypeError, ValueError) as exc:
-        raise ServingStartupError(
-            f"tuned_threshold tag {raw!r} is not numeric"
-        ) from exc
-    if not math.isfinite(value) or not 0.0 < value < 1.0:
-        raise ServingStartupError(
-            f"tuned_threshold tag {raw!r} is outside the open interval (0, 1)"
-        )
-    return value
 
 
 def fetch_serving_metadata(
@@ -132,12 +90,7 @@ def fetch_serving_metadata(
             ) from exc
         raise ServingStartupError(f"cannot read the model registry: {exc}") from exc
     tags = dict(model_version.tags)
-    missing = [tag for tag in REQUIRED_TAGS if tag not in tags]
-    if missing:
-        raise ServingStartupError(
-            f"model {name!r} version {model_version.version} is missing tags: "
-            f"{missing}"
-        )
+    check_required_tags(tags, f"model {name!r} version {model_version.version}")
     return ServingMetadata(
         model_name=name,
         version=str(model_version.version),

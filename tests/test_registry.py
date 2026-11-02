@@ -21,9 +21,8 @@ from src.serving.lookup import (
     load_lookup,
     save_sender_lookup,
 )
+from src.serving.metadata import REQUIRED_TAGS, ServingStartupError
 from src.serving.registry import (
-    REQUIRED_TAGS,
-    ServingStartupError,
     fetch_serving_metadata,
     load_model,
     parse_model_uri,
@@ -233,9 +232,10 @@ def test_save_rejects_bad_header(tmp_path: Path) -> None:
 def startup(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[Path]:
     """Patch registry access so build_predictor touches no MLflow store."""
     lookup_path = tmp_path / "lookup.json"
+    monkeypatch.setattr(config, "MODEL_SOURCE", "registry")
     monkeypatch.setattr(config, "SENDER_LOOKUP_PATH", lookup_path)
-    monkeypatch.setattr("src.serving.app.MlflowClient", lambda **kw: object())
-    monkeypatch.setattr("src.serving.app.configure_mlflow", lambda uri: None)
+    monkeypatch.setattr("src.serving.registry.MlflowClient", lambda **kw: object())
+    monkeypatch.setattr("src.serving.registry.configure_mlflow", lambda uri: None)
     app.state.predictor = None
     yield lookup_path
     app.state.predictor = None
@@ -246,7 +246,7 @@ def _patch_registry(
 ) -> None:
     metadata = make_metadata(lookup_sha256=lookup_sha)
     monkeypatch.setattr(
-        "src.serving.app.fetch_serving_metadata", lambda uri, client: metadata
+        "src.serving.registry.fetch_serving_metadata", lambda uri, client: metadata
     )
 
     def fake_load(meta: Any, tracking_uri: str) -> Any:
@@ -254,7 +254,7 @@ def _patch_registry(
             raise ServingStartupError("cannot load model models:/email-priority/3")
         return StubModel()
 
-    monkeypatch.setattr("src.serving.app.load_model", fake_load)
+    monkeypatch.setattr("src.serving.registry.load_model", fake_load)
 
 
 def test_startup_succeeds_and_model_info_reports_registry_state(
@@ -311,7 +311,7 @@ def test_startup_fails_on_registry_problem_before_reading_lookup(
     def boom(uri: str, client: Any) -> Any:
         raise ServingStartupError("alias 'champion' of registered model not found")
 
-    monkeypatch.setattr("src.serving.app.fetch_serving_metadata", boom)
+    monkeypatch.setattr("src.serving.registry.fetch_serving_metadata", boom)
     with pytest.raises(ServingStartupError, match="alias 'champion'"):
         build_predictor()
 

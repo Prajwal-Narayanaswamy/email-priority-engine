@@ -126,6 +126,13 @@ def test_predict_leadership_sender_flagged(client: TestClient) -> None:
     assert "probability" not in body
 
 
+def test_omitted_date_field_gives_sentinel_features(client: TestClient) -> None:
+    body = client.post("/predict", json={"from": "a@b.com", "subject": "hi"})
+    assert body.status_code == 200
+    assert body.json()["features"]["hour_of_day"] == -1
+    assert body.json()["features"]["day_of_week"] == -1
+
+
 @pytest.mark.parametrize("date", [None, "garbage", "", "32 Foo 2001"])
 def test_missing_or_unparseable_date_gives_sentinel(
     lookup: dict[str, int], date: str | None
