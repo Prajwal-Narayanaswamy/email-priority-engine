@@ -1,77 +1,45 @@
-version: "3.9"
-
+# Serving only (ADR-015). The image is generic; the model bundle is mounted
+# read-only. Export it first:  python -m scripts.export_model_bundle
+# Monitoring services (mlflow server, prometheus, grafana) return in their own
+# stage; prometheus/ and grafana/ are kept as scaffolding for it.
 services:
-
-  # ── MLflow tracking server ──────────────────────────────────────
-  mlflow:
-    image: ghcr.io/mlflow/mlflow:v2.13.0
-    ports:
-      - "5000:5000"
-    volumes:
-      - ./mlruns:/mlruns
-      - ./mlartifacts:/mlartifacts
-    command: >
-      mlflow server
-      --host 0.0.0.0
-      --port 5000
-      --backend-store-uri sqlite:///mlruns/mlflow.db
-      --default-artifact-root /mlartifacts
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  # ── FastAPI prediction service ──────────────────────────────────
   api:
     build:
       context: .
       dockerfile: docker/api/Dockerfile
+    image: email-priority-api:local
     ports:
-      - "8000:8000"
-      - "8001:8001"   # Prometheus metrics
+      - "127.0.0.1:${API_PORT:-8000}:8000"
     volumes:
-      - ./data:/app/data
+      # create_host_path: false is set, but on Docker Desktop with WSL it does NOT
+      # stop Docker creating an empty root-owned ./serving_bundle when the bundle
+      # is missing (observed). Startup still fails safe: exit 3, "bundle file
+      # manifest.json is missing in /bundle". Remove the stray directory with
+      # `sudo rm -rf serving_bundle` and re-export.
+      - type: bind
+        source: ./serving_bundle
+        target: /bundle
+        read_only: true
+        bind:
+          create_host_path: false
     environment:
-      - MLFLOW_TRACKING_URI=http://mlflow:5000
-      - MODEL_NAME=${MODEL_NAME:-email-priority-classifier}
-      - MODEL_VERSION=${MODEL_VERSION:-1}
-      - PREDICTION_LOG_DB=/app/data/predictions.db
-      - DRIFT_CHECK_EVERY_N_PREDICTIONS=${DRIFT_CHECK_EVERY_N_PREDICTIONS:-500}
-      - DRIFT_ALERT_THRESHOLD=${DRIFT_ALERT_THRESHOLD:-0.20}
-    depends_on:
-      mlflow:
-        condition: service_healthy
+      MODEL_SOURCE: bundle
+      MODEL_BUNDLE_DIR: /bundle
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: "no"
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
-      interval: 15s
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"
+      interval: 30s
       timeout: 5s
       retries: 3
-
-  # ── Prometheus ──────────────────────────────────────────────────
-  prometheus:
-    image: prom/prometheus:v2.52.0
-    ports:
-      - "9090:9090"
-    volumes:
-      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-    depends_on:
-      - api
-
-  # ── Grafana ────────────────────────────────────────────────────
-  grafana:
-    image: grafana/grafana:10.4.2
-    ports:
-      - "3000:3000"
-    volumes:
-      - ./grafana/provisioning:/etc/grafana/provisioning:ro
-      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
-    environment:
-      - GF_SECURITY_ADMIN_PASSWORD=admin
-      - GF_USERS_ALLOW_SIGN_UP=false
-    depends_on:
-      - prometheus
-
-networks:
-  default:
-    name: email-pipeline-net
+      start_period: 40s

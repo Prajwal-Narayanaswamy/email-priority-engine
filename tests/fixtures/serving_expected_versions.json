@@ -1,0 +1,12 @@
+{
+  "source": "library_versions in serving_bundle/metadata.json exported 2026-11-02T04:18:56+00:00 (email-priority version 1): the training environment of the ADR-013 reference model",
+  "versions": {
+    "lightgbm": "4.7.0",
+    "scikit-learn": "1.9.0",
+    "numpy": "2.5.2",
+    "pandas": "2.3.3",
+    "scipy": "1.18.0",
+    "skops": "0.14.0"
+  },
+  "python": "3.12.3"
+}
