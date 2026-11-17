@@ -57,5 +57,7 @@ class ModelInfoOut(BaseModel):
     tags: dict[str, str]
     feature_columns: list[str]
     sender_lookup_size: int
+    runtime_versions: dict[str, str]
+    bundle_versions: dict[str, str] | None
     caveats: str
     sender_frequency_note: str

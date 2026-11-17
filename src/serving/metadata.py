@@ -6,7 +6,7 @@ This module must not import mlflow: the bundle path runs in an image without it.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 REQUIRED_TAGS: tuple[str, ...] = (
     "tuned_threshold",
@@ -32,6 +32,8 @@ class ServingMetadata:
     threshold: float
     lookup_sha256: str
     tags: dict[str, str]
+    #: Library versions the bundle was exported with (None for registry mode).
+    bundle_versions: dict[str, str] | None = field(default=None, compare=False)
 
     @property
     def model_uri(self) -> str:

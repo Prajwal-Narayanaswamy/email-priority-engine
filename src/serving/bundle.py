@@ -144,6 +144,13 @@ def verify_manifest(bundle_dir: Path) -> dict[str, str]:
     return {name: str(files[name]) for name in MANIFEST_FILES}
 
 
+def _library_versions(document: dict[str, Any]) -> dict[str, str] | None:
+    versions = document.get("library_versions")
+    if not isinstance(versions, dict):
+        return None
+    return {str(k): str(v) for k, v in versions.items()}
+
+
 def load_bundle_metadata(bundle_dir: Path) -> ServingMetadata:
     """Verify the bundle and return its ServingMetadata.
 
@@ -188,6 +195,7 @@ def load_bundle_metadata(bundle_dir: Path) -> ServingMetadata:
         threshold=threshold,
         lookup_sha256=tags["lookup_sha256"],
         tags={str(k): str(v) for k, v in tags.items()},
+        bundle_versions=_library_versions(document),
     )
     if document.get("lookup_sha256") != metadata.lookup_sha256:
         raise ServingStartupError(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import subprocess
 import sys
 from collections.abc import Callable, Iterator
@@ -19,6 +20,7 @@ from src.serving import bundle, config
 from src.serving.app import app, build_predictor
 from src.serving.lookup import file_sha256
 from src.serving.metadata import ServingMetadata, ServingStartupError
+from src.serving.versions import runtime_versions
 from tests.serving_helpers import make_synthetic_bundle
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -276,3 +278,45 @@ def test_serving_imports_exclude_training_and_mlflow(module: str) -> None:
         check=True,
     )
     assert result.stdout.strip() == "", f"{module} imported: {result.stdout.strip()}"
+
+
+# ---- runtime versus bundle library versions (warn, never fail)
+
+
+def test_model_info_reports_runtime_and_bundle_versions(served: Path) -> None:
+    with TestClient(app) as client:
+        info = client.get("/model-info").json()
+    assert info["runtime_versions"] == runtime_versions()
+    assert info["bundle_versions"] == {"python": "3.12"}
+
+
+def test_startup_warns_but_still_serves_when_versions_differ(
+    served: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    _rewrite_json(
+        served / bundle.METADATA_FILE,
+        lambda d: d["library_versions"].update({"lightgbm": "0.0.1"}),
+    )
+    _rehash(served)
+    with caplog.at_level(logging.WARNING, logger="src.serving.versions"):
+        with TestClient(app) as client:
+            assert client.get("/health").status_code == 200
+    assert any(
+        "lightgbm runtime" in r.getMessage() and "vs bundle 0.0.1" in r.getMessage()
+        for r in caplog.records
+        if r.levelno == logging.WARNING
+    )
+
+
+def test_startup_is_silent_when_versions_match(
+    served: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    current = runtime_versions()
+    _rewrite_json(
+        served / bundle.METADATA_FILE,
+        lambda d: d["library_versions"].update(current),
+    )
+    _rehash(served)
+    with caplog.at_level(logging.WARNING, logger="src.serving.versions"):
+        build_predictor()
+    assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []

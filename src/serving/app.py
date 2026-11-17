@@ -11,7 +11,7 @@ from typing import Any
 from fastapi import FastAPI, HTTPException, Request
 
 from src.features.columns import BEHAVIORAL_FEATURES
-from src.serving import bundle, config
+from src.serving import bundle, config, versions
 from src.serving.lookup import load_lookup
 from src.serving.metadata import ServingMetadata, ServingStartupError
 from src.serving.predictor import (
@@ -78,6 +78,7 @@ def build_predictor() -> Predictor:
             f"MODEL_SOURCE must be one of {list(MODEL_SOURCES)} "
             f"(got {source!r}); there is no default and no fallback"
         )
+    versions.warn_on_mismatch(versions.runtime_versions(), metadata.bundle_versions)
     logger.info(
         "Serving %s version %s from %s (threshold %s)",
         metadata.model_name,
@@ -153,6 +154,8 @@ def model_info(request: Request) -> ModelInfoOut:
         tags=meta.tags,
         feature_columns=list(BEHAVIORAL_FEATURES),
         sender_lookup_size=len(predictor.lookup),
+        runtime_versions=versions.runtime_versions(),
+        bundle_versions=meta.bundle_versions,
         caveats=CAVEATS,
         sender_frequency_note=SENDER_FREQUENCY_NOTE,
     )
