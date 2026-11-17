@@ -7,6 +7,27 @@ Be specific. "Worked on features" is useless. "Ran feature_flow.py, got KeyError
 sender column, traced to ingest output missing sender_email field" is useful.
 ---
 
+### Session: 2026-11-17 (post-merge housekeeping)
+**Stage:** PR #3 (`feature/training-stage`) merged into `main` as `bbfc888` (a merge
+commit, so `git branch --merged` listed the branch). D2 is complete.
+
+**What I completed:**
+- `main` pulled to `bbfc888`. Local `feature/training-stage` deleted (`-d`, was
+  `bda91e5`). The remote branch was already gone (GitHub deleted it on merge); the
+  stale `origin/feature/training-stage` tracking ref was pruned.
+- This log entry was made on `docs/post-merge-d2`, not on `main`.
+
+**Open:** dependency regrouping from the 2026-11-02 audit (onnx, onnxruntime,
+skl2onnx, nltk, prometheus-client, dvc, tqdm are imported by no code). Still not
+verified on the default port 8000 (held by `splunkd` on the user's host). The CI
+docker job in `.github/workflows/ci.yml` is untouched.
+
+**Next session — first thing to do:**
+> Decide the dependency regrouping, then pick the next stage (live monitoring,
+> CI/CD for ML and ONNX export are all NOT STARTED). Branch from an up-to-date `main`.
+
+---
+
 ### Session: 2026-11-17 (Step D2 verification: image built and run; port and mount findings)
 **Stage:** D2 verified in the user's terminal and committed in focused commits. Not
 pushed.
