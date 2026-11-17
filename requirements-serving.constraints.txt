@@ -1,0 +1,14 @@
+# Versions the serving image is pinned to. The first six are the versions recorded
+# in the model bundle's metadata.json (the training environment, ADR-013 model);
+# the rest are the versions the serving tests ran against.
+lightgbm==4.7.0
+scikit-learn==1.9.0
+numpy==2.5.2
+pandas==2.3.3
+scipy==1.18.0
+skops==0.14.0
+fastapi==0.141.1
+pydantic==2.13.4
+uvicorn==0.52.3
+python-dotenv==1.2.3
+pyyaml==6.0.3

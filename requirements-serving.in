@@ -1,0 +1,15 @@
+# Runtime needs of the serving image (MODEL_SOURCE=bundle). Must list exactly the
+# `serving` extra in pyproject.toml (tests/test_docker_files.py checks this).
+# An extra is additive on top of [project.dependencies], so the image installs from
+# the lock compiled from THIS file, never from `pip install .[serving]`.
+fastapi>=0.111.0
+uvicorn>=0.30.0
+lightgbm>=4.7.0
+scikit-learn>=1.5.0
+numpy>=1.26.0
+pandas>=2.2.0,<3
+scipy>=1.13.0
+pydantic>=2.7.0
+skops>=0.14.0,<1
+python-dotenv>=1.0.0
+pyyaml>=6.0
