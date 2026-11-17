@@ -152,7 +152,7 @@ urgency predictor. What exists (ADR-014):
   threshold, a stale lookup or a hash mismatch stops the service with a specific
   message. There is no fallback to loading by run ID.
 
-Not built: Docker image, `/predict/batch`, `/metrics`, prediction logging.
+Not built: `/predict/batch`, `/metrics`, prediction logging.
 
 ### Commands
 
@@ -170,6 +170,29 @@ uvicorn src.serving.app:app --port 8000
 
 Registration refuses to run twice: it stops if the source run already has a
 version or the `champion` alias is already set.
+
+### Docker (api only, ADR-015)
+
+The image is generic (hashed lock, non-root user, read-only root filesystem, no
+mlflow). The model bundle is exported once and mounted read-only at `/bundle`.
+**Export the bundle before `docker compose up`.**
+
+```bash
+python -m scripts.export_model_bundle         # writes ./serving_bundle (local only)
+API_PORT=8001 docker compose up -d            # host port; defaults to 8000
+curl -s localhost:8001/health
+docker compose down
+```
+
+The service binds `127.0.0.1` only. Verified once with `API_PORT=8001`: the
+container became healthy, `/predict` for the Lay example above returned the
+score recorded for the registry model (0.5446273611788119), a missing or
+corrupted bundle exits with code 3 and a specific message. The default port 8000
+was not verified there because another program held it.
+
+If an empty root-owned `serving_bundle/` appears (Docker Desktop on WSL can create
+it when the bundle is missing; `create_host_path: false` does not prevent it),
+remove it with `sudo rm -rf serving_bundle` and re-export.
 
 ### What the serving API does, and does not, guarantee
 
@@ -197,8 +220,8 @@ uncalibrated (inflated by `scale_pos_weight`), not a probability, and
 
 | Stage | Status |
 |---|---|
-| Serving API | **Built:** registry-backed, versioned lookup, parity-tested; no Docker, batch, `/metrics` or prediction logging yet |
-| Docker image | **NEXT** |
+| Serving API | **Built:** registry-backed, versioned lookup, parity-tested; no batch, `/metrics` or prediction logging yet |
+| Docker image | **BUILT** (hashed lock, non-root, read-only, verified bundle) |
 | Live monitoring | **NOT STARTED** |
 | CI/CD for ML: automated retraining/promotion/deployment | **NOT STARTED** |
 | ONNX export and runtime validation | **NOT STARTED** |

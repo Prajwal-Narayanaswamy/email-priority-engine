@@ -454,7 +454,7 @@ and departs from the architecture diagram above:
 **Out of scope for this pass:** Docker, `/predict/batch`, `/metrics`, SQLite
 prediction logging and ONNX. Each needs its own approval.
 
-### ADR-015: Serving image and model bundle (approved; D1 bundle code implemented, Dockerfile and compose not yet rewritten)
+### ADR-015: Serving image and model bundle (approved; bundle code implemented; Dockerfile, compose and lock written; image built and verified 2026-11-17)
 **Context:** The existing `docker/api/Dockerfile` and `docker-compose.yml` predate
 the serving code: the `CMD` names a module that does not exist
 (`src.serving.main:app`), `HEALTHCHECK` uses `curl` (absent in
@@ -502,12 +502,23 @@ paths, so a container cannot load them from the registry as-is.
    the artifacts (they are local and gitignored), so a baked image could not be
    built or tested there, and every model change would force a rebuild.
 5. **Dependencies.** `pyproject.toml` declares `skops` (previously only a
-   transitive pin of full mlflow) and a `serving` extra with only the API's
-   runtime needs. The image installs a hashed lock compiled from that extra, with
-   versions matching the model's own `requirements.txt` (lightgbm 4.7.0, numpy
-   2.5.2, pandas 2.3.3, scikit-learn 1.9.0, scipy 1.18.0, skops 0.14.0) and a
-   pinned base image tag. The existing project dependencies are floors with no
-   lock and are unchanged.
+   transitive pin of full mlflow) and lists the API's runtime needs as a `serving`
+   extra. An extra is additive on top of `[project.dependencies]`, so
+   `pip install .[serving]` would still install prefect, mlflow and the rest; the
+   image therefore installs `requirements-serving.lock`, compiled with
+   `uv pip compile` from `requirements-serving.in` (a test keeps it identical to
+   the extra) plus `requirements-serving.constraints.txt`. The lock has hashes, is
+   for Python 3.12 on `x86_64-manylinux_2_28`, and holds 31 packages. lightgbm
+   4.7.0, scikit-learn 1.9.0, numpy 2.5.2, pandas 2.3.3, scipy 1.18.0 and skops
+   0.14.0 are pinned to the training environment recorded in the bundle's
+   `metadata.json` (a test compares the lock with a committed copy of those
+   versions); fastapi, pydantic, uvicorn, python-dotenv and pyyaml are pinned to
+   the versions the serving tests ran against. The base image is
+   `python:3.12-slim-bookworm` by tag (no digest yet). The remaining project
+   dependencies are floors with no lock and are unchanged.
+   `/model-info` reports `runtime_versions` and `bundle_versions`, and startup
+   logs one WARNING if they differ (Python by major.minor, libraries exactly); a
+   mismatch never blocks startup.
 6. **Container hygiene.** Non-root user, `PYTHONUNBUFFERED`,
    `PYTHONDONTWRITEBYTECODE`, a strict `.dockerignore` (`.venv`, `data`, `mlruns`,
    `.git`, `.env`, logs, bundles), and a stdlib `HEALTHCHECK` (`urllib.request`
@@ -515,6 +526,8 @@ paths, so a container cannot load them from the registry as-is.
    means the model is ready).
 7. **Compose scope: the `api` service only,** with the bundle mounted read-only,
    `MODEL_SOURCE=bundle`, a read-only root filesystem and a tmpfs for `/tmp`.
+   The host port is `127.0.0.1:${API_PORT:-8000}` (added after Windows port 8000
+   was found occupied by another service during verification).
 
 **Out of scope:** MLflow server, Prometheus and Grafana services, `/metrics`,
 prediction logging, `/predict/batch`, ONNX, and registry mode inside the
@@ -525,10 +538,22 @@ container.
   different version, and nothing in the container follows later alias moves.
 - The bundle contains the 20,312-sender lookup (real Enron addresses), so
   bundles and any image or volume holding one stay local and private.
-- Library versions are pinned to what the model was logged with; the bundle
-  loader does not yet compare runtime versions with the recorded ones.
-- Dockerfile, compose, lock file and the CI docker job are still the old,
-  broken versions until step D2.
+- Library versions are pinned to what the model was logged with; a mismatch
+  with the bundle is warned about, not refused.
+- The lock targets one platform (linux x86_64, Python 3.12); an arm64 host needs
+  its own lock.
+- The Dockerfile copies the `src/serving`, `src/features` and `src/labels`
+  packages whole, so `registry.py` and `registration.py` are in the image but
+  need mlflow: `MODEL_SOURCE=registry` fails inside it (intended). A test checks
+  that the copied packages are exactly the import closure of the app.
+- The compose bind mount sets `create_host_path: false`, but on Docker Desktop
+  with WSL that does NOT prevent Docker creating an empty root-owned
+  `serving_bundle/` when the bundle is missing (observed 2026-11-17). Startup
+  still fails safe: exit 3 with "bundle file manifest.json is missing in
+  /bundle". Recovery: `sudo rm -rf serving_bundle`, then re-export. The test
+  asserts only that the setting is present, not the behavior.
+- The CI docker job (`.github/workflows/ci.yml`) still points at the Dockerfile
+  path but is untouched, and the CI/CD stage owns its other problems.
 
 ## Feature Hypotheses
 Every feature requires a hypothesis before implementation. Validate in EDA notebook.

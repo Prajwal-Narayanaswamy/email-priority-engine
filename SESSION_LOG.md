@@ -7,6 +7,79 @@ Be specific. "Worked on features" is useless. "Ran feature_flow.py, got KeyError
 sender column, traced to ingest output missing sender_email field" is useful.
 ---
 
+### Session: 2026-11-17 (Step D2 verification: image built and run; port and mount findings)
+**Stage:** D2 verified in the user's terminal and committed in focused commits. Not
+pushed.
+
+**What I completed:**
+- Full suite before the port edit: 418 passed, 11 warnings, 424 s. A Prefect
+  "Logging error" traceback printed after the summary
+  (`'Stopping temporary server on ...'`) is teardown noise; exit code 0.
+- Build 1m34s, build context 103 kB, image 706 MB (404 MB is the hashed install).
+  `/app` holds only the lock and `src/{__init__,features,labels,serving}`.
+- Compose up (healthy), `/model-info` runtime versions equal the bundle's for all
+  six model libraries; Lay score 0.5446273611788119 (diff < 1e-9 vs the recorded
+  value), no-date request gives hour/day -1 (score 0.9990979597616334, above the
+  0.9943 threshold). uid 10001, root filesystem read-only, /tmp writable, no
+  WARNING or ERROR in the logs, `pip freeze` equals the lock (only name-case
+  differences such as PyYAML/pyyaml).
+- Failure paths: missing bundle exits 3 ("bundle file manifest.json is missing in
+  /bundle"); a one-byte flip in model.skops exits 3 with the sha256 mismatch message.
+
+**What broke / decisions:**
+- Docker was not in the WSL distro until Docker Desktop's WSL integration was enabled.
+- Port 8000 was held on the Windows host by `splunkd` (PID 6000, Splunk Web), so
+  compose up failed with a WSAEACCES bind error. Decision: leave Splunk alone and
+  make the host port `127.0.0.1:${API_PORT:-8000}` (docker-compose.yml, one test
+  line). Only those two files changed; nothing under `src/` was touched by that
+  edit. The default port 8000 itself was therefore NOT verified; 8001 was.
+- `create_host_path: false` does NOT stop Docker Desktop on WSL from creating an
+  empty root-owned `serving_bundle/` when the bundle is missing (observed). My
+  verification script then moved the real bundle aside and the `mv` back failed;
+  recovered with `sudo rmdir serving_bundle` and `mv`. Wording corrected in
+  ADR-015 (known limitations), the compose comment, the test (asserts only the
+  setting) and README. Startup still fails safe (exit 3).
+- README Roadmap: Docker image BUILT; Docker section added (only verified claims).
+
+**Open:** dependency regrouping from the 2026-11-02 audit (onnx, onnxruntime,
+skl2onnx, nltk, prometheus-client, dvc, tqdm unused). The CI docker job is untouched.
+
+**Next session — first thing to do:**
+> Decide the dependency regrouping, or start the next stage. Pushing and the PR
+> need the user's approval.
+
+---
+
+### Session: 2026-11-02 (Step D2: lock, Dockerfile, compose, version reporting; dependency audit)
+**Stage:** Files written, NOT committed, image NOT built (the user builds). Not pushed.
+
+**What I completed:**
+- Dependency audit (read-only): of 23 main + 7 dev dependencies, no code imports
+  onnx, onnxruntime, skl2onnx, nltk, prometheus-client, dvc, tqdm (planned stages);
+  uvicorn is CLI only; httpx, black, ruff, isort, pytest-cov, pytest-asyncio are
+  tools. `pip install -e ".[dev]"` resolves to 252 packages (243 for the main list).
+- `requirements-serving.in`/`.constraints.txt`/`.lock` (uv 0.13.6, hashes, py3.12,
+  x86_64-manylinux_2_28): 31 packages, model libraries pinned to the bundle's
+  recorded training versions. Installed with `--require-hashes` into a throwaway venv:
+  `pip freeze` == lock, mlflow absent, API served the real bundle, Lay score
+  0.5446273611788119 (diff 0.0). An extra is additive, so the image installs the lock,
+  not `.[serving]`.
+- Dockerfile (slim-bookworm, libgomp1, uid 10001, stdlib healthcheck, copies only
+  src/__init__.py, features, labels, serving = the app's import closure),
+  `.dockerignore`, api-only compose (127.0.0.1 only, bundle bind :ro without
+  create_host_path, read_only + tmpfs /tmp, cap_drop ALL, no-new-privileges).
+- `/model-info` gains `runtime_versions` and `bundle_versions`; startup logs one
+  WARNING on a mismatch, never fails. Tests: test_versions.py, test_docker_files.py,
+  additions to test_bundle.py.
+- black/ruff/isort clean; 133 targeted tests passed. mlflow.db sha256 8ce61c5f...
+  and size 1228800 unchanged.
+
+**Next session — first thing to do:**
+> Run the printed commands (full suite, docker build, compose up, failure paths),
+> then commit D2. Decide the dependency regrouping proposed in the audit.
+
+---
+
 ### Session: 2026-11-01 (Docs commits, Step D1: model bundle and MODEL_SOURCE; ADR-015)
 **Stage:** Docs committed (88e2b08, e3d6f03, 0554ad7). D1 verified by the user: full
 suite 380 passed (420s), bundle exported with mlflow.db unchanged, served from the
