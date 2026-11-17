@@ -18,9 +18,12 @@ commit, so `git branch --merged` listed the branch). D2 is complete.
 - This log entry was made on `docs/post-merge-d2`, not on `main`.
 
 **Open:** dependency regrouping from the 2026-11-02 audit (onnx, onnxruntime,
-skl2onnx, nltk, prometheus-client, dvc, tqdm are imported by no code). Still not
-verified on the default port 8000 (held by `splunkd` on the user's host). The CI
+skl2onnx, nltk, prometheus-client, dvc, tqdm are imported by no code). The CI
 docker job in `.github/workflows/ci.yml` is untouched.
+- Port 8000 is held by `splunkd` on the user's machine, so the compose default stays
+  8000 but is unverified here; verification used `API_PORT=8001`.
+- Branches `docs/git-workflow` and `fix/ci-malformed-to-test` were fully merged
+  into `main` (no unmerged commits) and were deleted locally and on the remote.
 
 **Next session — first thing to do:**
 > Decide the dependency regrouping, then pick the next stage (live monitoring,
